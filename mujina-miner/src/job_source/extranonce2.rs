@@ -1,0 +1,440 @@
+//! Extranonce2 types for Bitcoin mining.
+//!
+//! In Bitcoin mining, the search space is multidimensional:
+//!
+//! - **Nonce** (32 bits) - Rolled by hardware
+//! - **Version** (maskable bits) - Rolled by hardware if enabled
+//! - **Extranonce2** (variable size) - Typically rolled by software
+//! - **nTime** (32 bits) - Typically rolled by software
+//!
+//! This module provides three types for managing the extranonce2 dimension:
+//!
+//! - `Extranonce2`: An immutable value with a specific size (1-8 bytes)
+//! - `Extranonce2Range`: A range specification [min, max] with no position state
+//! - `Extranonce2Iter`: An iterator that generates `Extranonce2` values from a range
+//!
+//! Mining pools allocate a specific byte size for extranonce2 (typically 4-8 bytes),
+//! which determines how many unique coinbase transactions a miner can generate before
+//! needing new work. The range type provides splitting for dividing work between
+//! domains, while the iterator type handles sequential value generation.
+
+use std::fmt;
+
+use thiserror::Error;
+
+/// Errors that can occur when creating Extranonce2 types.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum Extranonce2Error {
+    #[error("Invalid extranonce2 size: {0} (must be 1-8 bytes)")]
+    InvalidSize(u8),
+
+    #[error("Value {0} exceeds maximum for size {1} bytes")]
+    ValueTooLarge(u64, u8),
+
+    #[error("Invalid range: min {0} >= max {1}")]
+    InvalidRange(u64, u64),
+}
+
+/// A specific extranonce2 value with fixed size.
+///
+/// This is an immutable value type representing a single extranonce2 that will be
+/// serialized into a coinbase transaction or stored in a share. The value is stored
+/// as a u64 but serializes to the specified number of bytes (1-8).
+///
+/// Use `Extranonce2Range::iter()` to generate sequences of these values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Extranonce2 {
+    value: u64,
+    size: u8,
+}
+
+impl Extranonce2 {
+    /// Create a new extranonce2 value.
+    ///
+    /// Returns an error if the size is invalid (must be 1-8 bytes) or if the value
+    /// is too large to fit in the specified size.
+    pub fn new(value: u64, size: u8) -> Result<Self, Extranonce2Error> {
+        if size == 0 || size > 8 {
+            return Err(Extranonce2Error::InvalidSize(size));
+        }
+
+        let max = Self::max_for_size(size);
+        if value > max {
+            return Err(Extranonce2Error::ValueTooLarge(value, size));
+        }
+
+        Ok(Self { value, size })
+    }
+
+    /// Get the value as a u64.
+    pub fn value(&self) -> u64 {
+        self.value
+    }
+
+    /// Get the size in bytes.
+    pub fn size(&self) -> u8 {
+        self.size
+    }
+
+    /// Get the maximum value for a given size.
+    fn max_for_size(size: u8) -> u64 {
+        if size >= 8 {
+            u64::MAX
+        } else {
+            (1u64 << (size * 8)) - 1
+        }
+    }
+
+    /// Extend a vector with the serialized bytes of this extranonce2.
+    pub fn extend_vec(&self, vec: &mut Vec<u8>) {
+        vec.extend_from_slice(&self.value.to_le_bytes()[..self.size as usize]);
+    }
+}
+
+impl From<Extranonce2> for Vec<u8> {
+    /// Convert to little-endian bytes for inclusion in coinbase transaction.
+    fn from(ext: Extranonce2) -> Vec<u8> {
+        ext.value.to_le_bytes()[..ext.size as usize].to_vec()
+    }
+}
+
+impl fmt::Display for Extranonce2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:0width$x}", self.value, width = self.size as usize * 2)
+    }
+}
+
+/// A range specification for extranonce2 values.
+///
+/// Defines the available extranonce2 space [min, max] without tracking position.
+/// Ranges are immutable and can be split into non-overlapping sub-ranges for
+/// distributing work between boards or chip chains.
+///
+/// Call `.iter()` to create an `Extranonce2Iter` for generating values.
+///
+/// Can be constructed with struct literals or via `new()` / `new_range()` for
+/// validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extranonce2Range {
+    pub min: u64,
+    pub max: u64,
+    pub size: u8,
+}
+
+impl Extranonce2Range {
+    /// Create a range covering the full space for the given size.
+    pub fn new(size: u8) -> Result<Self, Extranonce2Error> {
+        if size == 0 || size > 8 {
+            return Err(Extranonce2Error::InvalidSize(size));
+        }
+
+        let max = Extranonce2::max_for_size(size);
+        Ok(Self { min: 0, max, size })
+    }
+
+    /// Create a range with custom bounds.
+    pub fn new_range(min: u64, max: u64, size: u8) -> Result<Self, Extranonce2Error> {
+        if size == 0 || size > 8 {
+            return Err(Extranonce2Error::InvalidSize(size));
+        }
+
+        if min > max {
+            return Err(Extranonce2Error::InvalidRange(min, max));
+        }
+
+        let size_max = Extranonce2::max_for_size(size);
+        if max > size_max {
+            return Err(Extranonce2Error::ValueTooLarge(max, size));
+        }
+
+        Ok(Self { min, max, size })
+    }
+
+    /// Get the total number of values in the range.
+    ///
+    /// Returns `u64::MAX` if the range spans the entire u64 space (the true
+    /// count would be 2^64 which doesn't fit in a u64).
+    pub fn len(&self) -> u64 {
+        // Use saturating_add to handle the full-range case (min=0, max=u64::MAX)
+        (self.max - self.min).saturating_add(1)
+    }
+
+    /// Check if the range is empty.
+    pub fn is_empty(&self) -> bool {
+        self.min > self.max
+    }
+
+    /// Split this range into `n` non-overlapping sub-ranges.
+    ///
+    /// Each sub-range will have approximately the same size, with any remainder
+    /// distributed among the first few ranges.
+    ///
+    /// Returns `None` if `n` is 0 or if the range is too small to split.
+    pub fn split(&self, n: usize) -> Option<Vec<Extranonce2Range>> {
+        if n == 0 {
+            return None;
+        }
+
+        if n == 1 {
+            return Some(vec![self.clone()]);
+        }
+
+        let total = self.len();
+        if (total as usize) < n {
+            return None;
+        }
+
+        let chunk_size = total / (n as u64);
+        let remainder = total % (n as u64);
+
+        let mut ranges = Vec::with_capacity(n);
+        let mut start = self.min;
+
+        for i in 0..n {
+            // Distribute remainder among first few chunks
+            let size = chunk_size + if (i as u64) < remainder { 1 } else { 0 };
+            let end = start + size - 1;
+
+            ranges.push(Self::new_range(start, end, self.size).expect("sub-range should be valid"));
+
+            start = end + 1;
+        }
+
+        Some(ranges)
+    }
+
+    /// Create an iterator over this range.
+    pub fn iter(&self) -> Extranonce2Iter {
+        Extranonce2Iter {
+            range: self.clone(),
+            current: self.min,
+        }
+    }
+}
+
+/// Iterator that generates `Extranonce2` values from a range.
+///
+/// Created via `Extranonce2Range::iter()`. Implements Rust's `Iterator` trait
+/// for use in `for` loops and with iterator combinators.
+#[derive(Clone)]
+pub struct Extranonce2Iter {
+    range: Extranonce2Range,
+    current: u64,
+}
+
+impl Extranonce2Iter {
+    /// Get the current value without advancing.
+    pub fn current(&self) -> Extranonce2 {
+        Extranonce2::new(self.current, self.range.size).expect("current should be valid")
+    }
+
+    /// Reset to the beginning of the range.
+    pub fn reset(&mut self) {
+        self.current = self.range.min;
+    }
+}
+
+impl Iterator for Extranonce2Iter {
+    type Item = Extranonce2;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current > self.range.max {
+            return None;
+        }
+        let val = Extranonce2::new(self.current, self.range.size).ok()?;
+        self.current += 1;
+        Some(val)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.current > self.range.max {
+            (0, Some(0))
+        } else {
+            let remaining = (self.range.max - self.current + 1).min(usize::MAX as u64) as usize;
+            (remaining, Some(remaining))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Extranonce2 value type tests
+    #[test]
+    fn test_extranonce2_new() {
+        let ext = Extranonce2::new(0, 4).unwrap();
+        assert_eq!(ext.value(), 0);
+        assert_eq!(ext.size(), 4);
+
+        let ext = Extranonce2::new(0x1234, 4).unwrap();
+        assert_eq!(ext.value(), 0x1234);
+    }
+
+    #[test]
+    fn test_extranonce2_errors() {
+        // Invalid size
+        assert!(matches!(
+            Extranonce2::new(0, 0),
+            Err(Extranonce2Error::InvalidSize(0))
+        ));
+        assert!(matches!(
+            Extranonce2::new(0, 9),
+            Err(Extranonce2Error::InvalidSize(9))
+        ));
+
+        // Value too large for size
+        assert!(matches!(
+            Extranonce2::new(0x100, 1),
+            Err(Extranonce2Error::ValueTooLarge(0x100, 1))
+        ));
+        assert!(matches!(
+            Extranonce2::new(0x1_0000, 2),
+            Err(Extranonce2Error::ValueTooLarge(0x1_0000, 2))
+        ));
+    }
+
+    #[test]
+    fn test_extranonce2_to_bytes() {
+        let ext = Extranonce2::new(0, 4).unwrap();
+        assert_eq!(Vec::<u8>::from(ext), vec![0, 0, 0, 0]);
+
+        let ext = Extranonce2::new(0x1234, 4).unwrap();
+        assert_eq!(Vec::<u8>::from(ext), vec![0x34, 0x12, 0, 0]); // Little-endian
+
+        let ext = Extranonce2::new(0xab, 1).unwrap();
+        assert_eq!(Vec::<u8>::from(ext), vec![0xab]);
+    }
+
+    #[test]
+    fn test_extranonce2_display() {
+        let ext = Extranonce2::new(0, 4).unwrap();
+        assert_eq!(format!("{}", ext), "00000000");
+
+        let ext = Extranonce2::new(0x1234, 4).unwrap();
+        assert_eq!(format!("{}", ext), "00001234");
+
+        let ext = Extranonce2::new(0xab, 2).unwrap();
+        assert_eq!(format!("{}", ext), "00ab");
+    }
+
+    // Extranonce2Range tests
+    #[test]
+    fn test_range_new() {
+        let range = Extranonce2Range::new(4).unwrap();
+        assert_eq!(range.len(), 1u64 << 32);
+        assert!(!range.is_empty());
+    }
+
+    #[test]
+    fn test_range_new_range() {
+        let range = Extranonce2Range::new_range(0x1000, 0x2000, 4).unwrap();
+        assert_eq!(range.len(), 0x1001);
+    }
+
+    #[test]
+    fn test_range_split() {
+        let range = Extranonce2Range::new_range(0, 99, 1).unwrap();
+        let splits = range.split(4).unwrap();
+
+        assert_eq!(splits.len(), 4);
+        assert_eq!(splits[0].len(), 25);
+        assert_eq!(splits[1].len(), 25);
+        assert_eq!(splits[2].len(), 25);
+        assert_eq!(splits[3].len(), 25);
+
+        // Check boundaries
+        assert_eq!(splits[0].min, 0);
+        assert_eq!(splits[0].max, 24);
+        assert_eq!(splits[1].min, 25);
+        assert_eq!(splits[1].max, 49);
+        assert_eq!(splits[2].min, 50);
+        assert_eq!(splits[2].max, 74);
+        assert_eq!(splits[3].min, 75);
+        assert_eq!(splits[3].max, 99);
+    }
+
+    #[test]
+    fn test_range_split_with_remainder() {
+        let range = Extranonce2Range::new_range(0, 9, 1).unwrap();
+        let splits = range.split(3).unwrap();
+
+        assert_eq!(splits.len(), 3);
+        // 10 values split 3 ways: 4, 3, 3
+        assert_eq!(splits[0].len(), 4);
+        assert_eq!(splits[1].len(), 3);
+        assert_eq!(splits[2].len(), 3);
+    }
+
+    // Extranonce2Iter tests
+    #[test]
+    fn test_iter_basic() {
+        let range = Extranonce2Range::new_range(0, 2, 1).unwrap();
+        let mut iter = range.iter();
+
+        assert_eq!(iter.next().unwrap().value(), 0);
+        assert_eq!(iter.next().unwrap().value(), 1);
+        assert_eq!(iter.next().unwrap().value(), 2);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_iter_current_and_reset() {
+        let range = Extranonce2Range::new_range(10, 20, 1).unwrap();
+        let mut iter = range.iter();
+
+        assert_eq!(iter.current().value(), 10);
+        iter.next();
+        iter.next();
+        assert_eq!(iter.current().value(), 12);
+
+        iter.reset();
+        assert_eq!(iter.current().value(), 10);
+    }
+
+    #[test]
+    fn test_iter_for_loop() {
+        let range = Extranonce2Range::new_range(0, 4, 1).unwrap();
+        let values: Vec<u64> = range.iter().map(|ex2| ex2.value()).collect();
+
+        assert_eq!(values, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_iter_size_hint() {
+        let range = Extranonce2Range::new_range(0, 99, 1).unwrap();
+        let iter = range.iter();
+
+        let (lower, upper) = iter.size_hint();
+        assert_eq!(lower, 100);
+        assert_eq!(upper, Some(100));
+    }
+
+    #[test]
+    fn test_full_u64_range_len() {
+        // 8-byte extranonce2 spans entire u64 space (min=0, max=u64::MAX)
+        let range = Extranonce2Range::new(8).unwrap();
+        // len() would be 2^64 but that doesn't fit in u64, so saturates to MAX
+        assert_eq!(range.len(), u64::MAX);
+    }
+
+    #[test]
+    fn test_iter_combinators() {
+        let range = Extranonce2Range::new_range(0, 99, 1).unwrap();
+
+        // Take first 10
+        let values: Vec<u64> = range.iter().take(10).map(|ex2| ex2.value()).collect();
+        assert_eq!(values.len(), 10);
+        assert_eq!(values[0], 0);
+        assert_eq!(values[9], 9);
+
+        // Skip first 90, take 5
+        let values: Vec<u64> = range
+            .iter()
+            .skip(90)
+            .take(5)
+            .map(|ex2| ex2.value())
+            .collect();
+        assert_eq!(values, vec![90, 91, 92, 93, 94]);
+    }
+}

@@ -1,0 +1,601 @@
+// Minimal embedded HTTP server giving nano3s_doom a touchscreen gamepad
+// over LAN -- this device has no keyboard or game controller attached.
+// Serves one static HTML+JS page (a D-pad plus action/weapon buttons) and
+// accepts "GET /key?code=<name>&state=down|up" from it, translating each
+// into a doomgeneric key event pushed onto a small ring buffer that
+// web_gamepad_get_key() drains. That function is a drop-in DG_GetKey
+// backend -- it mirrors DG_GetKey's own contract exactly (see
+// i_input.c's `while (DG_GetKey(&pressed, &key))` drain loop).
+//
+// One fresh TCP connection per input event (HTTP/1.0, "Connection:
+// close") rather than a persistent/WebSocket link -- DOOM's engine only
+// needs a press event followed eventually by a release event to track a
+// key as continuously "held" (see g_game.c's gamekeydown[]), so per-tic
+// polling isn't needed, and the robustness/simplicity of a fresh
+// connection per touch is worth more here than the small extra TCP
+// handshake latency on a local WiFi link.
+//
+// No auth -- consistent with every other HTTP control surface already
+// exposed by this project (mujina-minerd's own PATCH APIs), all of which
+// assume a trusted LAN.
+
+#include "web_gamepad.h"
+#include "doomkeys.h"
+
+// buzzer_music.c has no header of its own (see doomgeneric_nano3s.c's
+// nano3s_doom_emergency_silence for the same pattern) -- declared here
+// for the /audio mute-toggle endpoint below.
+extern void buzzer_music_set_muted(int muted);
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+// nano3s_ui only reasserts control of /dev/fb0 when this file's value
+// changes away from "doom" (see nano3s_ui/README.md's Pages section) --
+// nano3s_doom exiting on its own doesn't touch it. Without writing this
+// back on quit, the panel would be left showing DOOM's last frame forever
+// until someone manually cycles the physical button.
+#define DISPLAY_PAGE_FILE "/mntapp/release/linux/app/fb_page"
+
+#define QUEUE_CAP 64
+
+typedef struct {
+    int pressed;
+    unsigned char doomKey;
+} key_event_t;
+
+static key_event_t s_queue[QUEUE_CAP];
+static int s_head = 0;
+static int s_tail = 0;
+static pthread_mutex_t s_queue_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int s_listen_fd = -1;
+static volatile int s_running = 0;
+
+static void queue_push(int pressed, unsigned char doomKey) {
+    pthread_mutex_lock(&s_queue_lock);
+    int next = (s_tail + 1) % QUEUE_CAP;
+    if (next != s_head) { /* ring full: drop rather than overwrite/block */
+        s_queue[s_tail].pressed = pressed;
+        s_queue[s_tail].doomKey = doomKey;
+        s_tail = next;
+    }
+    pthread_mutex_unlock(&s_queue_lock);
+}
+
+int web_gamepad_get_key(int *pressed, unsigned char *doomKey) {
+    int got = 0;
+    pthread_mutex_lock(&s_queue_lock);
+    if (s_head != s_tail) {
+        *pressed = s_queue[s_head].pressed;
+        *doomKey = s_queue[s_head].doomKey;
+        s_head = (s_head + 1) % QUEUE_CAP;
+        got = 1;
+    }
+    pthread_mutex_unlock(&s_queue_lock);
+    return got;
+}
+
+// ── Live screen preview (GET /frame.bmp) ────────────────────────────────
+// The game thread pushes its already-downscaled RGB565 frame here every
+// tic; the HTTP thread only converts to BMP (RGB565 -> 24-bit BGR, the
+// format an <img> tag can render with zero client-side JS) at request
+// time, so an idle browser costs nothing beyond one memcpy's worth of
+// work per DOOM tic. Single fixed-size buffer, no allocation: this pair
+// of functions runs on two different threads (game thread writes, HTTP
+// thread reads) so it's mutex-guarded, but never both directions at once.
+
+static uint16_t s_frame[GAMEPAD_FRAME_W * GAMEPAD_FRAME_H];
+static pthread_mutex_t s_frame_lock = PTHREAD_MUTEX_INITIALIZER;
+static int s_frame_ready = 0;
+
+void web_gamepad_set_frame(const uint16_t *pixels) {
+    pthread_mutex_lock(&s_frame_lock);
+    memcpy(s_frame, pixels, sizeof(s_frame));
+    s_frame_ready = 1;
+    pthread_mutex_unlock(&s_frame_lock);
+}
+
+static unsigned char key_from_name(const char *name) {
+    if (strcmp(name, "up") == 0) return KEY_UPARROW;
+    if (strcmp(name, "down") == 0) return KEY_DOWNARROW;
+    if (strcmp(name, "left") == 0) return KEY_LEFTARROW;
+    if (strcmp(name, "right") == 0) return KEY_RIGHTARROW;
+    if (strcmp(name, "strafeL") == 0) return KEY_STRAFE_L;
+    if (strcmp(name, "strafeR") == 0) return KEY_STRAFE_R;
+    if (strcmp(name, "fire") == 0) return KEY_FIRE;
+    if (strcmp(name, "use") == 0) return KEY_USE;
+    if (strcmp(name, "enter") == 0) return KEY_ENTER;
+    if (strcmp(name, "escape") == 0) return KEY_ESCAPE;
+    if (name[0] >= '1' && name[0] <= '7' && name[1] == '\0') return (unsigned char)name[0];
+    return 0;
+}
+
+/* Codes are plain identifiers (letters/digits only) generated by our own
+ * page's JS, never arbitrary user text, so no percent-decoding is needed. */
+static int query_get(const char *query, const char *key, char *out, size_t outsz) {
+    size_t keylen = strlen(key);
+    const char *p = query;
+    while (p && *p) {
+        if (strncmp(p, key, keylen) == 0 && p[keylen] == '=') {
+            p += keylen + 1;
+            size_t i = 0;
+            while (p[i] && p[i] != '&' && p[i] != ' ' && p[i] != '\r' && p[i] != '\n' && i + 1 < outsz) {
+                out[i] = p[i];
+                i++;
+            }
+            out[i] = '\0';
+            return 1;
+        }
+        p = strchr(p, '&');
+        if (p) p++;
+    }
+    return 0;
+}
+
+static const char GAMEPAD_HTML[] =
+"<!DOCTYPE html>\n"
+"<html>\n"
+"<head>\n"
+"<meta charset='utf-8'>\n"
+"<meta name='viewport' content='width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover'>\n"
+"<title>nano3s DOOM</title>\n"
+"<style>\n"
+"* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }\n"
+"html, body { margin:0; padding:0; width:100%; height:100%; background:#0a0a0a; color:#c8c8c8;\n"
+"  font-family:-apple-system,'Segoe UI',sans-serif; overflow:hidden; touch-action:none;\n"
+"  user-select:none; -webkit-user-select:none; }\n"
+"body { display:flex; flex-direction:column; }\n"
+"#bar { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; padding:5px 10px;\n"
+"  font-size:12px; letter-spacing:1px; color:#a33; border-bottom:1px solid #2a0000; }\n"
+"#screen-wrap { flex:1 1 auto; min-height:0; overflow:hidden; display:flex; justify-content:center;\n"
+"  align-items:center; background:#000; border-bottom:1px solid #1a1a1a; }\n"
+"#screen { width:100%; height:100%; object-fit:contain; image-rendering:pixelated; background:#000; }\n"
+"#weapons { flex:0 0 auto; display:flex; gap:4px; padding:4px 10px; }\n"
+"#pad-area { flex:0 0 auto; display:flex;\n"
+"  align-items:flex-end; justify-content:space-between; padding:0 12px 10px 12px; }\n"
+"#dpad { display:grid; grid-template-columns:50px 50px 50px; grid-template-rows:50px 50px 50px;\n"
+"  grid-template-areas: '. up .' 'left mid right' '. down .'; gap:3px; }\n"
+".up { grid-area:up; } .down { grid-area:down; } .left { grid-area:left; } .right { grid-area:right; }\n"
+".mid { grid-area:mid; visibility:hidden; }\n"
+".btn { display:flex; align-items:center; justify-content:center; background:#1c1c1c;\n"
+"  border:1px solid #3a3a3a; border-radius:10px; color:#ddd; font-size:18px; font-weight:bold; }\n"
+"#dpad .btn { font-size:16px; }\n"
+".btn.active { background:#b41111; border-color:#ff3b3b; color:#fff; }\n"
+".small { font-size:11px; padding:6px 9px; border-radius:8px; }\n"
+".danger { border-color:#661111; color:#ff6b6b; }\n"
+".wbtn { flex:1; font-size:13px; padding:6px 0; border-radius:6px; }\n"
+"#actions { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }\n"
+".strafe-row { display:flex; gap:6px; }\n"
+"#fire { width:70px; height:70px; border-radius:50%; background:#3a0000; border:2px solid #b41111;\n"
+"  color:#ff5a5a; font-size:13px; }\n"
+"#fire.active { background:#ff2222; color:#fff; }\n"
+"#usebtn { width:70px; height:34px; font-size:12px; }\n"
+"</style>\n"
+"</head>\n"
+"<body>\n"
+"<div id='bar'>\n"
+"  <span>NANO3S DOOM</span>\n"
+"  <div style='display:flex;gap:8px'>\n"
+"    <div class='btn small active' id='soundbtn'>SND: OFF</div>\n"
+"    <div class='btn small' data-code='escape'>ESC</div>\n"
+"    <div class='btn small' data-code='enter'>ENTER</div>\n"
+"    <div class='btn small danger' id='quitbtn'>QUIT</div>\n"
+"  </div>\n"
+"</div>\n"
+"<div id='screen-wrap'>\n"
+"  <img id='screen' width='240' height='150' alt='doom preview'>\n"
+"</div>\n"
+"<div id='weapons'>\n"
+"  <div class='btn wbtn' data-code='1'>1</div>\n"
+"  <div class='btn wbtn' data-code='2'>2</div>\n"
+"  <div class='btn wbtn' data-code='3'>3</div>\n"
+"  <div class='btn wbtn' data-code='4'>4</div>\n"
+"  <div class='btn wbtn' data-code='5'>5</div>\n"
+"  <div class='btn wbtn' data-code='6'>6</div>\n"
+"  <div class='btn wbtn' data-code='7'>7</div>\n"
+"</div>\n"
+"<div id='pad-area'>\n"
+"  <div id='dpad'>\n"
+"    <div class='btn up' data-code='up'>&#9650;</div>\n"
+"    <div class='btn left' data-code='left'>&#9664;</div>\n"
+"    <div class='btn mid'></div>\n"
+"    <div class='btn right' data-code='right'>&#9654;</div>\n"
+"    <div class='btn down' data-code='down'>&#9660;</div>\n"
+"  </div>\n"
+"  <div id='actions'>\n"
+"    <div class='strafe-row'>\n"
+"      <div class='btn small' data-code='strafeL'>STR&#8592;</div>\n"
+"      <div class='btn small' data-code='strafeR'>STR&#8594;</div>\n"
+"    </div>\n"
+"    <div id='fire' class='btn' data-code='fire'>FIRE</div>\n"
+"    <div id='usebtn' class='btn' data-code='use'>USE</div>\n"
+"  </div>\n"
+"</div>\n"
+"<script>\n"
+"function send(code, state) {\n"
+"  fetch('/key?code=' + code + '&state=' + state, { method:'GET', cache:'no-store' }).catch(function(){});\n"
+"}\n"
+"function bind(el) {\n"
+"  var code = el.getAttribute('data-code');\n"
+"  var active = false;\n"
+"  function down(e) {\n"
+"    e.preventDefault();\n"
+"    try { el.setPointerCapture(e.pointerId); } catch (err) {}\n"
+"    if (active) return;\n"
+"    active = true;\n"
+"    el.classList.add('active');\n"
+"    send(code, 'down');\n"
+"  }\n"
+"  function up(e) {\n"
+"    e.preventDefault();\n"
+"    if (!active) return;\n"
+"    active = false;\n"
+"    el.classList.remove('active');\n"
+"    send(code, 'up');\n"
+"  }\n"
+"  el.addEventListener('pointerdown', down);\n"
+"  el.addEventListener('pointerup', up);\n"
+"  el.addEventListener('pointercancel', up);\n"
+"  el.addEventListener('contextmenu', function(e){ e.preventDefault(); });\n"
+"}\n"
+"document.querySelectorAll('[data-code]').forEach(bind);\n"
+"var keyMap = {\n"
+"  ArrowUp:'up', KeyW:'up', ArrowDown:'down', KeyS:'down',\n"
+"  ArrowLeft:'left', ArrowRight:'right', KeyA:'strafeL', KeyD:'strafeR',\n"
+"  ControlLeft:'fire', ControlRight:'fire', Space:'use',\n"
+"  Enter:'enter', NumpadEnter:'enter', Escape:'escape',\n"
+"  Digit1:'1', Digit2:'2', Digit3:'3', Digit4:'4', Digit5:'5', Digit6:'6', Digit7:'7'\n"
+"};\n"
+"var codeHoldCount = {};\n"
+"function setCodeActive(code, active) {\n"
+"  var btns = document.querySelectorAll('[data-code]');\n"
+"  for (var i = 0; i < btns.length; i++) {\n"
+"    if (btns[i].getAttribute('data-code') === code) {\n"
+"      btns[i].classList.toggle('active', active);\n"
+"    }\n"
+"  }\n"
+"}\n"
+"function releaseAllKeys() {\n"
+"  for (var code in codeHoldCount) {\n"
+"    if (codeHoldCount[code] > 0) {\n"
+"      codeHoldCount[code] = 0;\n"
+"      setCodeActive(code, false);\n"
+"      send(code, 'up');\n"
+"    }\n"
+"  }\n"
+"}\n"
+/* Multiple physical keys can share one logical control (ArrowUp and W
+ * both mean 'up') -- a hold-count per code, not a boolean, so releasing
+ * one of two held keys doesn't send a premature 'up' while the other is
+ * still down. e.repeat filters the browser's own key-repeat keydowns,
+ * which would otherwise re-send 'down' many times per second. */
+"document.addEventListener('keydown', function(e) {\n"
+"  var code = keyMap[e.code];\n"
+"  if (!code) return;\n"
+"  e.preventDefault();\n"
+"  if (e.repeat) return;\n"
+"  var n = (codeHoldCount[code] || 0) + 1;\n"
+"  codeHoldCount[code] = n;\n"
+"  if (n === 1) {\n"
+"    setCodeActive(code, true);\n"
+"    send(code, 'down');\n"
+"  }\n"
+"});\n"
+"document.addEventListener('keyup', function(e) {\n"
+"  var code = keyMap[e.code];\n"
+"  if (!code) return;\n"
+"  e.preventDefault();\n"
+"  var n = (codeHoldCount[code] || 0) - 1;\n"
+"  if (n < 0) n = 0;\n"
+"  codeHoldCount[code] = n;\n"
+"  if (n === 0) {\n"
+"    setCodeActive(code, false);\n"
+"    send(code, 'up');\n"
+"  }\n"
+"});\n"
+/* Same "stuck input" failure class the buzzer hit earlier this project --
+ * if the tab loses focus while a key is physically held, its keyup can
+ * fire outside the page (or never reach us at all), leaving that control
+ * stuck 'down' forever. Force-release on blur, same defense-in-depth
+ * spirit as driver.c's silence_buzzer(). */
+"window.addEventListener('blur', releaseAllKeys);\n"
+"var screenImg = document.getElementById('screen');\n"
+"var frameBusy = false;\n"
+"function refreshFrame() {\n"
+"  if (frameBusy) return;\n"
+"  frameBusy = true;\n"
+"  var pre = new Image();\n"
+"  pre.onload = function() { screenImg.src = pre.src; frameBusy = false; };\n"
+"  pre.onerror = function() { frameBusy = false; };\n"
+"  pre.src = '/frame.bmp?t=' + Date.now();\n"
+"}\n"
+"setInterval(refreshFrame, 200);\n"
+"refreshFrame();\n"
+"var soundBtn = document.getElementById('soundbtn');\n"
+"var muted = true;\n" /* matches buzzer_music.c's default-muted start state */
+"function updateSoundBtn() {\n"
+"  soundBtn.textContent = muted ? 'SND: OFF' : 'SND: ON';\n"
+"  soundBtn.classList.toggle('active', muted);\n"
+"}\n"
+"soundBtn.addEventListener('pointerdown', function(e) {\n"
+"  e.preventDefault();\n"
+"  muted = !muted;\n"
+"  updateSoundBtn();\n"
+"  fetch('/audio?mute=' + (muted ? '1' : '0'), { method:'GET', cache:'no-store' }).catch(function(){});\n"
+"});\n"
+"soundBtn.addEventListener('contextmenu', function(e){ e.preventDefault(); });\n"
+"updateSoundBtn();\n"
+"var quitBtn = document.getElementById('quitbtn');\n"
+"quitBtn.addEventListener('pointerdown', function(e) {\n"
+"  e.preventDefault();\n"
+"  if (!confirm('Quit DOOM?')) return;\n"
+"  fetch('/quit', { method:'GET', cache:'no-store' }).catch(function(){});\n"
+"});\n"
+"quitBtn.addEventListener('contextmenu', function(e){ e.preventDefault(); });\n"
+"document.addEventListener('touchmove', function(e){ e.preventDefault(); }, { passive:false });\n"
+"</script>\n"
+"</body>\n"
+"</html>\n";
+
+static void write_all(int fd, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = write(fd, buf + sent, len - sent);
+        if (n <= 0) {
+            return;
+        }
+        sent += (size_t)n;
+    }
+}
+
+static void send_response(int fd, const char *status, const char *content_type,
+                           const char *body, size_t body_len) {
+    char header[256];
+    int hlen = snprintf(header, sizeof(header),
+        "HTTP/1.0 %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status, content_type, body_len);
+    if (hlen > 0) {
+        write_all(fd, header, (size_t)hlen);
+    }
+    if (body_len) {
+        write_all(fd, body, body_len);
+    }
+}
+
+static void put_u32le(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+// Builds a plain uncompressed BMP (BITMAPFILEHEADER + BITMAPINFOHEADER,
+// 24bpp, BI_RGB) from the latest frame -- no PNG/JPEG library exists in
+// this static-linked toolchain, and BMP needs none: every browser decodes
+// it natively from an <img src>. Negative height selects top-down row
+// order so the RGB565->BGR888 conversion below can stream straight
+// through in the buffer's natural order instead of writing bottom-up.
+// 240*3 = 720 bytes/row is already a multiple of 4, so BMP's usual
+// row-padding rule needs no extra handling here.
+static void send_frame_bmp(int fd) {
+    static uint16_t local[GAMEPAD_FRAME_W * GAMEPAD_FRAME_H];
+    int ready;
+    pthread_mutex_lock(&s_frame_lock);
+    ready = s_frame_ready;
+    if (ready) {
+        memcpy(local, s_frame, sizeof(local));
+    }
+    pthread_mutex_unlock(&s_frame_lock);
+
+    if (!ready) {
+        send_response(fd, "503 Service Unavailable", "text/plain", "", 0);
+        return;
+    }
+
+    const uint32_t pixel_bytes = (uint32_t)(GAMEPAD_FRAME_W * 3) * (uint32_t)GAMEPAD_FRAME_H;
+    const uint32_t file_size = 54 + pixel_bytes;
+
+    uint8_t bmp_header[54];
+    memset(bmp_header, 0, sizeof(bmp_header));
+    bmp_header[0] = 'B';
+    bmp_header[1] = 'M';
+    put_u32le(bmp_header + 2, file_size);
+    put_u32le(bmp_header + 10, 54); /* bfOffBits */
+    put_u32le(bmp_header + 14, 40); /* biSize */
+    put_u32le(bmp_header + 18, (uint32_t)GAMEPAD_FRAME_W);
+    put_u32le(bmp_header + 22, (uint32_t)(-(int32_t)GAMEPAD_FRAME_H)); /* top-down */
+    bmp_header[26] = 1;  /* biPlanes */
+    bmp_header[28] = 24; /* biBitCount */
+
+    char http_header[256];
+    int hlen = snprintf(http_header, sizeof(http_header),
+        "HTTP/1.0 200 OK\r\n"
+        "Content-Type: image/bmp\r\n"
+        "Content-Length: %u\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        file_size);
+    if (hlen > 0) {
+        write_all(fd, http_header, (size_t)hlen);
+    }
+    write_all(fd, (const char *)bmp_header, sizeof(bmp_header));
+
+    uint8_t row[GAMEPAD_FRAME_W * 3];
+    for (int y = 0; y < GAMEPAD_FRAME_H; y++) {
+        const uint16_t *src = local + (size_t)y * GAMEPAD_FRAME_W;
+        for (int x = 0; x < GAMEPAD_FRAME_W; x++) {
+            uint16_t px = src[x];
+            uint8_t r5 = (uint8_t)((px >> 11) & 0x1F);
+            uint8_t g6 = (uint8_t)((px >> 5) & 0x3F);
+            uint8_t b5 = (uint8_t)(px & 0x1F);
+            row[x * 3 + 0] = (uint8_t)((b5 << 3) | (b5 >> 2)); /* B */
+            row[x * 3 + 1] = (uint8_t)((g6 << 2) | (g6 >> 4)); /* G */
+            row[x * 3 + 2] = (uint8_t)((r5 << 3) | (r5 >> 2)); /* R */
+        }
+        write_all(fd, (const char *)row, sizeof(row));
+    }
+}
+
+// GET /quit: reuses the exact same shutdown path a plain `kill` already
+// takes (see doomgeneric_nano3s.c's SIGTERM handler) rather than adding a
+// second, less-tested exit route -- raise() delivers to whichever thread
+// calls it, but the handler only sets a flag the main loop polls, so it
+// doesn't matter that this runs on the HTTP thread instead of the game
+// thread. buzzer/web-server cleanup then happens exactly as it does for
+// a manual kill.
+static void quit_to_idle_page(void) {
+    FILE *f = fopen(DISPLAY_PAGE_FILE, "w");
+    if (f) {
+        fputs("nano3s", f);
+        fclose(f);
+    }
+}
+
+static void handle_connection(int fd) {
+    char req[2048];
+    ssize_t n = recv(fd, req, sizeof(req) - 1, 0);
+    if (n <= 0) {
+        return;
+    }
+    req[n] = '\0';
+
+    if (strncmp(req, "GET ", 4) != 0) {
+        send_response(fd, "400 Bad Request", "text/plain", "", 0);
+        return;
+    }
+    char *path_start = req + 4;
+    char *path_end = strchr(path_start, ' ');
+    if (!path_end) {
+        send_response(fd, "400 Bad Request", "text/plain", "", 0);
+        return;
+    }
+    *path_end = '\0';
+
+    char *query = strchr(path_start, '?');
+    if (query) {
+        *query = '\0';
+        query++;
+    }
+
+    if (strcmp(path_start, "/") == 0 || strcmp(path_start, "/index.html") == 0) {
+        send_response(fd, "200 OK", "text/html; charset=utf-8", GAMEPAD_HTML, strlen(GAMEPAD_HTML));
+        return;
+    }
+
+    if (strcmp(path_start, "/quit") == 0) {
+        send_response(fd, "200 OK", "text/plain", "ok", 2);
+        quit_to_idle_page();
+        raise(SIGTERM);
+        return;
+    }
+
+    if (strcmp(path_start, "/frame.bmp") == 0) {
+        send_frame_bmp(fd);
+        return;
+    }
+
+    if (strcmp(path_start, "/audio") == 0 && query) {
+        char mute[4];
+        if (query_get(query, "mute", mute, sizeof(mute))) {
+            buzzer_music_set_muted(mute[0] == '1');
+        }
+        send_response(fd, "200 OK", "text/plain", "ok", 2);
+        return;
+    }
+
+    if (strcmp(path_start, "/key") == 0 && query) {
+        char code[16];
+        char state[8];
+        if (query_get(query, "code", code, sizeof(code)) && query_get(query, "state", state, sizeof(state))) {
+            unsigned char dk = key_from_name(code);
+            if (dk != 0) {
+                queue_push(strcmp(state, "down") == 0 ? 1 : 0, dk);
+            }
+        }
+        send_response(fd, "200 OK", "text/plain", "ok", 2);
+        return;
+    }
+
+    send_response(fd, "404 Not Found", "text/plain", "", 0);
+}
+
+static void *server_thread_fn(void *arg) {
+    (void)arg;
+    while (s_running) {
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int fd = accept(s_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
+        if (fd < 0) {
+            if (!s_running) {
+                break;
+            }
+            continue;
+        }
+        handle_connection(fd);
+        close(fd);
+    }
+    return NULL;
+}
+
+int web_gamepad_init(unsigned short port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    if (listen(fd, 4) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    s_listen_fd = fd;
+    s_running = 1;
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, server_thread_fn, NULL) != 0) {
+        close(fd);
+        s_listen_fd = -1;
+        s_running = 0;
+        return -1;
+    }
+    pthread_detach(tid);
+
+    printf("[web_gamepad] listening on 0.0.0.0:%u\n", (unsigned)port);
+    fflush(stdout);
+    return 0;
+}
+
+void web_gamepad_shutdown(void) {
+    s_running = 0;
+    if (s_listen_fd >= 0) {
+        shutdown(s_listen_fd, SHUT_RDWR);
+        close(s_listen_fd);
+        s_listen_fd = -1;
+    }
+}

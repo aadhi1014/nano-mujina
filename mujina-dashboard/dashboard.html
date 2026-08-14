@@ -1,0 +1,1405 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MUJINA // FLEET MONITOR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --cyan: #00f0ff;
+      --mag: #ff2e97;
+      --lime: #c8ff00;
+      --amber: #ffb000;
+      --green: #1bff9c;
+      --purple: #b967ff;
+      --bg: #05060c;
+      --panel: #0a0f1c;
+      --line: #14243a;
+      --dim: #4a6a86;
+      --ink: #d6f7ff;
+      --grid: rgba(0, 240, 255, .05);
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: 'Share Tech Mono', ui-monospace, monospace;
+      background-image:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+      background-size: 34px 34px;
+    }
+    /* Scanline overlay */
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9;
+      background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0, rgba(0,0,0,.16) 1px, transparent 2px, transparent 3px);
+      mix-blend-mode: multiply;
+      opacity: .5;
+    }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 18px 40px; position: relative; z-index: 1; }
+    .top {
+      display: flex; align-items: flex-end; justify-content: space-between; gap: 10px;
+      border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 20px;
+    }
+    h1 {
+      font-family: 'Orbitron', sans-serif; font-weight: 900; margin: 0; font-size: 26px; letter-spacing: .18em;
+      color: #fff; text-shadow: 0 0 6px var(--cyan), 0 0 22px rgba(0,240,255,.55);
+      display: flex; align-items: center; gap: 10px;
+    }
+    h1 .chev { color: var(--mag); text-shadow: 0 0 6px var(--mag), 0 0 22px rgba(255,46,151,.55); }
+    h1 .brandmark {
+      height: 56px; width: auto; display: block;
+      filter: drop-shadow(0 0 5px var(--cyan)) drop-shadow(0 0 14px rgba(0,240,255,.55));
+    }
+    .tagline { color: var(--dim); font-size: 12px; letter-spacing: .22em; text-transform: uppercase; margin-top: 4px; }
+    
+    /* Alerts Banner */
+    .alert-banner {
+      display: none; background: rgba(255,46,151,.12); border: 1px solid var(--mag);
+      color: #fff; padding: 10px 14px; font-size: 12px; letter-spacing: .1em;
+      text-transform: uppercase; margin-bottom: 16px; border-radius: 4px;
+      box-shadow: 0 0 14px rgba(255,46,151,.25);
+    }
+    .alert-banner.show { display: flex; align-items: center; justify-content: space-between; }
+    
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .card {
+      position: relative; background: linear-gradient(160deg, var(--panel), #070b14);
+      border: 1px solid var(--line); padding: 14px 15px; overflow: hidden;
+      clip-path: polygon(0 0, calc(100% - 11px) 0, 100% 11px, 100% 100%, 11px 100%, 0 calc(100% - 11px));
+    }
+    .card::before {
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--cyan);
+      box-shadow: 0 0 10px var(--cyan); opacity: .8;
+    }
+    .card .label { font-size: 10px; letter-spacing: .2em; text-transform: uppercase; color: var(--dim); margin-bottom: 8px; }
+    .card .val {
+      font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 22px;
+      color: var(--cyan); text-shadow: 0 0 10px rgba(0,240,255,.45); font-variant-numeric: tabular-nums; line-height: 1.05;
+    }
+    .val small { font-family: 'Share Tech Mono', monospace; font-size: 12px; color: var(--dim); text-shadow: none; font-weight: 400; }
+    .span2 { grid-column: span 2; }
+    .span4 { grid-column: span 4; }
+    
+    /* Fleet Board Summary Grid */
+    .board-summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .bs-card {
+      background: linear-gradient(160deg, var(--panel), #070b14); border: 1px solid var(--line);
+      border-radius: 6px; padding: 14px 16px; cursor: pointer; transition: all .2s ease;
+      position: relative; overflow: hidden;
+    }
+    .bs-card:hover { border-color: var(--cyan); box-shadow: 0 0 16px rgba(0,240,255,.2); transform: translateY(-1px); }
+    .bs-card.active-card { border-color: var(--cyan); background: linear-gradient(160deg, #0d162a, #070b14); }
+    .bs-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .bs-name { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 14px; letter-spacing: .12em; text-transform: uppercase; }
+    .bs-model { font-size: 10px; color: var(--dim); letter-spacing: .08em; }
+    .bs-hr { font-family: 'Orbitron', sans-serif; font-size: 20px; font-weight: 700; color: var(--cyan); text-shadow: 0 0 8px rgba(0,240,255,.4); }
+    .bs-meta { display: flex; gap: 14px; font-size: 11px; color: var(--dim); margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+    .bs-badge {
+      font-size: 9px; letter-spacing: .1em; padding: 2px 6px; border-radius: 3px; font-family: 'Share Tech Mono', monospace; text-transform: uppercase;
+    }
+    .bs-badge.ok { background: rgba(200,255,0,.12); color: var(--lime); border: 1px solid rgba(200,255,0,.4); }
+    .bs-badge.warn { background: rgba(255,46,151,.12); color: var(--mag); border: 1px solid rgba(255,46,151,.4); }
+
+    /* Hero card layout */
+    .hero {
+      grid-column: span 2; grid-row: span 2; display: flex; flex-direction: column; justify-content: center;
+      border-color: rgba(0,240,255,.5); box-shadow: 0 0 0 1px rgba(0,240,255,.1), 0 0 30px rgba(0,240,255,.08) inset;
+      position: relative; overflow: hidden;
+    }
+    .hero-sparkline-svg {
+      position: absolute; left: 0; right: 0; bottom: 0; top: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 1; opacity: .55; transition: opacity .3s ease;
+    }
+    .hero-inner-content { position: relative; z-index: 2; }
+    .hero .val { font-size: 48px; color: #fff; text-shadow: 0 0 12px var(--cyan), 0 0 30px rgba(0,240,255,.6); }
+    .hero .val small { font-size: 20px; color: var(--cyan); }
+    .herobody { display: flex; align-items: center; gap: 20px; width: 100%; }
+    .heromain { flex: 0 0 auto; }
+    .heroside { flex: 1 1 auto; min-width: 0; padding-left: 18px; border-left: 1px solid rgba(0,240,255,.18); }
+    
+    /* Micro-tile ASIC Grid Matrix & Filter Toolbar */
+    .chip-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .chiplabel { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+    .chipfilters { display: flex; gap: 6px; }
+    .cfilterbtn {
+      background: #080d18; border: 1px solid var(--line); color: var(--dim); font-size: 9px;
+      letter-spacing: .1em; padding: 3px 8px; border-radius: 3px; cursor: pointer; text-transform: uppercase;
+      font-family: 'Share Tech Mono', monospace; transition: .15s;
+    }
+    .cfilterbtn.active { color: var(--cyan); border-color: var(--cyan); background: rgba(0,240,255,.1); }
+
+    .chipgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 6px; }
+    .chiptile {
+      background: rgba(5,7,14,.8); border: 1px solid var(--line); border-radius: 4px; padding: 7px 9px;
+      position: relative; transition: .2s ease;
+    }
+    .chiptile .ctname { font-size: 9px; color: var(--dim); letter-spacing: .1em; }
+    .chiptile .ctstat {
+      font-family: 'Orbitron', sans-serif; font-size: 11px; font-weight: 700; color: var(--cyan);
+      margin-top: 2px; font-variant-numeric: tabular-nums;
+    }
+    .chiptile .ctstat small { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--dim); font-weight: 400; }
+    .chiptile.weak { border-color: rgba(255,46,151,.6); background: rgba(255,46,151,.08); }
+    .chiptile.weak .ctstat { color: var(--mag); text-shadow: 0 0 6px rgba(255,46,151,.5); }
+    .chiptile.weak::after {
+      content: "LAZY"; position: absolute; right: 4px; top: 4px; font-size: 7px; color: var(--mag);
+      letter-spacing: .1em; border: 1px solid var(--mag); border-radius: 2px; padding: 1px 3px;
+    }
+
+    /* Auto-Tuner Live Terminal Console */
+    .at-console {
+      background: rgba(5, 8, 16, 0.95); border: 1px solid var(--line); border-radius: 5px; padding: 12px 14px;
+      font-family: 'Share Tech Mono', monospace; font-size: 11px; line-height: 1.6; margin-top: 6px;
+    }
+    .at-console-header {
+      display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line);
+      padding-bottom: 8px; margin-bottom: 8px;
+    }
+    .at-title { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 11px; color: var(--cyan); letter-spacing: .14em; text-transform: uppercase; }
+    .at-best-badge { font-size: 11px; color: var(--lime); text-shadow: 0 0 6px rgba(200,255,0,.3); }
+    .at-feed { max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .at-feed .entry { display: flex; gap: 10px; color: var(--dim); }
+    .at-feed .entry b { color: var(--ink); font-weight: 400; }
+    .at-feed .entry i { color: var(--mag); font-style: normal; }
+
+    .freq::before { background: var(--mag); box-shadow: 0 0 10px var(--mag); }
+    .freq .val { color: var(--mag); text-shadow: 0 0 10px rgba(255,46,151,.5); }
+    .pool::before { background: var(--lime); box-shadow: 0 0 10px var(--lime); }
+    .pool .val { color: var(--lime); text-shadow: 0 0 10px rgba(200,255,0,.4); font-size: 15px; word-break: break-all; line-height: 1.35; }
+    .poolmeta { display: flex; gap: 26px; margin-top: 12px; flex-wrap: wrap; }
+    .poolmeta span { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--lime); opacity: .75; }
+    .poolmeta b {
+      display: block; font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 16px; margin-top: 2px;
+      color: var(--lime); text-shadow: 0 0 10px rgba(200,255,0,.4); font-variant-numeric: tabular-nums;
+    }
+    .temp .val { color: var(--amber); text-shadow: 0 0 10px rgba(255,176,0,.4); }
+    .temp::before { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+    .eff .val { color: var(--green); text-shadow: 0 0 10px rgba(27,255,156,.4); }
+    .eff::before { background: var(--green); box-shadow: 0 0 10px var(--green); }
+    .fan .val { color: var(--purple); text-shadow: 0 0 10px rgba(185,103,255,.4); }
+    .fan::before { background: var(--purple); box-shadow: 0 0 10px var(--purple); }
+    .fanlist { display: flex; flex-direction: column; gap: 6px; margin-top: 1px; }
+    .fanrow { display: flex; flex-direction: column; gap: 1px; }
+    .fanrow .fname { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+    .fanrow .fstat {
+      font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 13px; color: var(--purple);
+      text-shadow: 0 0 8px rgba(185,103,255,.35); font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .fanrow .fstat small { font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--dim); font-weight: 400; }
+    
+    .dual { display: flex; align-items: stretch; height: 100%; }
+    .dual .dcell { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+    .dual .dcell+.dcell { margin-left: 16px; padding-left: 16px; border-left: 1px solid var(--line); }
+    .dual .label { margin-bottom: 6px; }
+    
+    .chartcard {
+      margin-top: 12px; background: linear-gradient(160deg, var(--panel), #070b14);
+      border: 1px solid var(--line); padding: 14px 16px; position: relative;
+      clip-path: polygon(0 0, calc(100% - 11px) 0, 100% 11px, 100% 100%, 11px 100%, 0 calc(100% - 11px));
+    }
+    .chartcard .label { font-size: 10px; letter-spacing: .2em; text-transform: uppercase; color: var(--dim); margin-bottom: 8px; }
+    .chartwrap { position: relative; width: 100%; height: 160px; }
+    canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+    .chartlegend {
+      display: flex; gap: 18px; margin-top: 10px; font-size: 10px; letter-spacing: .14em;
+      text-transform: uppercase; color: var(--dim); flex-wrap: wrap; align-items: center;
+    }
+    .chartlegend .lg { display: flex; align-items: center; gap: 7px; }
+    .chartlegend .sw { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--cyan); }
+    .chartlegend .sw-solid { box-shadow: 0 0 6px var(--cyan); }
+    .chartlegend .sw-dash { border-top: 2px dashed rgba(0,240,255,.55); opacity: .85; }
+    
+    .sec {
+      display: flex; align-items: center; gap: 10px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+      font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--cyan);
+      margin: 26px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); text-shadow: 0 0 8px rgba(0,240,255,.4);
+    }
+    .sec:first-of-type { margin-top: 0; }
+    .sec .sec-sub {
+      margin-left: auto; font-family: 'Share Tech Mono', monospace; font-weight: 400; letter-spacing: .06em;
+      color: var(--dim); text-shadow: none; text-transform: none; font-size: 11px;
+    }
+    
+    .boardtabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+    .btab {
+      display: flex; align-items: center; gap: 9px; background: var(--panel); border: 1px solid var(--line);
+      padding: 9px 14px; font-family: 'Share Tech Mono', monospace; font-size: 12px; letter-spacing: .08em;
+      color: var(--dim); cursor: pointer; text-transform: uppercase;
+      clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+      transition: .15s;
+    }
+    .btab.active { color: var(--ink); border-color: rgba(0,240,255,.5); box-shadow: 0 0 14px rgba(0,240,255,.15) inset; }
+    .btab:hover { color: var(--ink); }
+    .btab-tune-btn {
+      display: inline-flex; align-items: center; gap: 6px; background: #0a1120; border: 1px solid var(--line);
+      color: var(--cyan); font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 11px; letter-spacing: .12em;
+      padding: 8px 12px; border-radius: 4px; cursor: pointer; text-transform: uppercase; margin-left: auto; transition: .15s;
+    }
+    .btab-tune-btn:hover { border-color: var(--cyan); background: rgba(0,240,255,.12); box-shadow: 0 0 12px rgba(0,240,255,.3); }
+
+    .tdot { width: 7px; height: 7px; border-radius: 50%; }
+    .tdot.ok { background: var(--lime); box-shadow: 0 0 8px var(--lime); }
+    .tdot.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+    .tdot.crit { background: var(--mag); box-shadow: 0 0 8px var(--mag); animation: pulse 1.4s infinite; }
+    
+    .gear {
+      cursor: pointer; background: none; border: 1px solid var(--line); color: var(--cyan);
+      font-family: 'Share Tech Mono', monospace; font-size: 21px; line-height: 1; border-radius: 4px;
+      padding: 7px 10px; transition: .15s; box-shadow: 0 0 0 0 var(--cyan);
+    }
+    .gear:hover { border-color: var(--cyan); box-shadow: 0 0 12px rgba(0,240,255,.4); text-shadow: 0 0 8px var(--cyan); }
+    
+    /* Modal */
+    .modal {
+      position: fixed; inset: 0; z-index: 20; display: none; align-items: center; justify-content: center;
+      background: rgba(3,5,12,.78); backdrop-filter: blur(3px);
+    }
+    .modal.show { display: flex; }
+    .sheet {
+      width: min(450px, 92vw); max-height: 88vh; overflow: auto; background: linear-gradient(160deg, var(--panel), #070b14);
+      border: 1px solid rgba(0,240,255,.4); border-radius: 6px; padding: 22px 22px 20px;
+      box-shadow: 0 0 0 1px rgba(0,240,255,.1), 0 0 40px rgba(0,240,255,.12);
+    }
+    .sheet h2 {
+      font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 16px; letter-spacing: .16em;
+      margin: 0 0 4px; color: #fff; text-shadow: 0 0 8px var(--cyan); text-transform: uppercase;
+    }
+    .sheet .subhead { font-size: 11px; color: var(--dim); letter-spacing: .1em; text-transform: uppercase; margin-bottom: 4px; }
+    .modalsec {
+      display: flex; align-items: center; gap: 8px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+      font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--cyan);
+      margin: 22px 0 14px; padding-bottom: 7px; border-bottom: 1px solid var(--line); text-shadow: 0 0 8px rgba(0,240,255,.4);
+    }
+    .badge {
+      font-family: 'Share Tech Mono', monospace; font-size: 9px; letter-spacing: .14em; color: var(--amber);
+      border: 1px solid rgba(255,176,0,.4); border-radius: 3px; padding: 2px 6px; text-shadow: none;
+    }
+    .note { font-size: 11px; color: var(--dim); letter-spacing: .06em; margin: -4px 0 14px; line-height: 1.5; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    .row label { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+    .row input[type=number] {
+      width: 96px; background: #05070e; border: 1px solid var(--line); color: var(--ink);
+      font-family: 'Share Tech Mono', monospace; font-size: 15px; padding: 7px 9px; border-radius: 4px; text-align: right;
+    }
+    .row input[type=number]:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 10px rgba(0,240,255,.35); }
+    .row input[type=text], .row input[type=password] {
+      background: #05070e; border: 1px solid var(--line); color: var(--ink);
+      font-family: 'Share Tech Mono', monospace; font-size: 13px; padding: 7px 9px; border-radius: 4px;
+      text-align: left; max-width: 60%;
+    }
+    .row input[type=text]:focus, .row input[type=password]:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 10px rgba(0,240,255,.35); }
+    .row.hide { display: none; }
+    .seg { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+    .segbtn {
+      flex: 1; text-align: center; padding: 8px 6px; font-family: 'Share Tech Mono', monospace; font-size: 11px;
+      letter-spacing: .1em; text-transform: uppercase; color: var(--dim); background: #0a1120; cursor: pointer;
+      border: none; transition: .15s;
+    }
+    .segbtn+.segbtn { border-left: 1px solid var(--line); }
+    .segbtn.active { color: var(--ink); background: rgba(0,240,255,.12); box-shadow: 0 0 10px rgba(0,240,255,.15) inset; }
+    .segbtn:hover { color: var(--ink); }
+    
+    .sw { position: relative; width: 46px; height: 24px; }
+    .sw input { opacity: 0; width: 0; height: 0; }
+    .sw span { position: absolute; inset: 0; background: #0c1320; border: 1px solid var(--line); border-radius: 24px; cursor: pointer; transition: .2s; }
+    .sw span::before { content: ""; position: absolute; height: 16px; width: 16px; left: 3px; top: 3px; background: var(--dim); border-radius: 50%; transition: .2s; }
+    .sw input:checked+span { background: rgba(0,240,255,.15); border-color: var(--cyan); box-shadow: 0 0 10px rgba(0,240,255,.3); }
+    .sw input:checked+span::before { transform: translateX(22px); background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
+    
+    .acts { display: flex; gap: 10px; margin-top: 22px; }
+    .btn {
+      flex: 1; cursor: pointer; font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: .14em;
+      text-transform: uppercase; padding: 11px; border-radius: 4px; border: 1px solid var(--line); background: #0a1120; color: var(--dim); transition: .15s;
+    }
+    .btn:hover { color: var(--ink); border-color: var(--dim); }
+    .btn.pri { border-color: var(--cyan); color: var(--cyan); }
+    .btn.pri:hover { background: rgba(0,240,255,.12); box-shadow: 0 0 14px rgba(0,240,255,.35); text-shadow: 0 0 8px var(--cyan); }
+    .msg { margin-top: 14px; font-size: 12px; letter-spacing: .08em; min-height: 14px; color: var(--amber); }
+    .msg.ok { color: var(--lime); }
+    
+    .fvgroup { display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-bottom: 14px; transition: .2s; }
+    .fvgroup.locked { opacity: .5; pointer-events: none; }
+    .fvcell { flex: 1; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+    .fvcell label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+    .fvcell input {
+      width: 100%; background: #05070e; border: 1px solid var(--line); color: var(--ink);
+      font-family: 'Share Tech Mono', monospace; font-size: 16px; padding: 8px 9px; border-radius: 4px; text-align: right;
+    }
+    .fvcell input:focus { outline: none; border-color: var(--mag); box-shadow: 0 0 10px rgba(255,46,151,.3); }
+    .fvdiv { width: 1px; background: var(--line); }
+    
+    select {
+      background: #05070e; border: 1px solid var(--line); color: var(--ink);
+      font-family: 'Share Tech Mono', monospace; font-size: 14px; padding: 7px 9px; border-radius: 4px;
+    }
+    select:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 10px rgba(0,240,255,.3); }
+    
+    .atpill {
+      display: none; align-items: center; gap: 6.6px; font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+      color: var(--mag); border: 1px solid rgba(255,46,151,.5); border-radius: 22px; padding: 3.3px 11px;
+      text-shadow: 0 0 8px rgba(255,46,151,.5); animation: pulse 1.8s infinite; white-space: nowrap;
+    }
+    .atpill.on { display: inline-flex; }
+    
+    .status {
+      margin-top: 16px; color: var(--dim); font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+    }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+    .on { background: var(--lime); box-shadow: 0 0 10px var(--lime), 0 0 18px var(--lime); animation: pulse 1.4s infinite; }
+    .off { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+    
+    @media(max-width: 640px) {
+      .wrap { padding: 18px 12px 32px; }
+      .top { flex-wrap: wrap; gap: 6px; }
+      h1 { font-size: 20px; letter-spacing: .08em; }
+      h1 .brandmark { height: 42px; }
+      .grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+      .card { padding: 12px 13px; }
+      .card .val { font-size: 20px; }
+      .hero { grid-column: span 2; grid-row: auto; }
+      .hero .val { font-size: 38px; }
+      .herobody { flex-direction: column; align-items: stretch; gap: 12px; }
+      .heroside { padding-left: 0; border-left: none; border-top: 1px solid rgba(0,240,255,.18); padding-top: 12px; }
+      .span2 { grid-column: span 2; }
+      .pool .val { font-size: 14px; }
+      .dual .dcell+.dcell { margin-left: 10px; padding-left: 10px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1 id="mjlogo"><span class="chev">//</span>MUJINA<img class="brandmark" src="/mujina-head-mark.svg" alt="MUJINA"></h1>
+      <div class="tagline" id="tagline">booting…</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px">
+      <span class="atpill" id="atpill">◉ <span id="atpilltxt">auto-tuning</span></span>
+      <button class="gear" id="gear" title="Settings">⚙</button>
+    </div>
+  </div>
+
+  <!-- Alert Banner for Thermal & Hardware Warnings -->
+  <div class="alert-banner" id="alertBanner">
+    <span id="alertText">⚠️ Thermal Warning: ASIC temperature elevated</span>
+  </div>
+
+  <!-- Global Miner Settings Modal -->
+  <div class="modal" id="modal">
+    <div class="sheet">
+      <h2>Global Settings</h2>
+      <div class="subhead" id="modalboard">applies to whole miner</div>
+
+      <div class="modalsec">Identity</div>
+      <div class="note">The miner's name. Sent to the pool as the worker suffix so this rig is identifiable.</div>
+      <div class="row">
+        <label for="mname">Miner Name</label>
+        <input type="text" id="mname" placeholder="unnamed" style="width:180px">
+      </div>
+
+      <div class="modalsec">Pool <span class="badge" id="restartbadge" style="display:none">restart required</span></div>
+      <div class="note">Saved immediately, applied at next daemon start.</div>
+      <div class="row">
+        <label for="purl">URL</label>
+        <input type="text" id="purl" placeholder="stratum+tcp://pool:3333" style="width:210px">
+      </div>
+      <div class="row">
+        <label for="puser">User</label>
+        <input type="text" id="puser" placeholder="address or account" style="width:210px">
+      </div>
+      <div class="row">
+        <label for="ppass">Password</label>
+        <input type="password" id="ppass" placeholder="unchanged" style="width:210px">
+      </div>
+      <div class="note" id="workernote" style="margin:-6px 0 4px"></div>
+
+      <div class="modalsec">Apply</div>
+      <div class="note" id="restartnote">The daemon reads its name and pool once, at startup.</div>
+      <div class="acts" style="margin-top:0">
+        <button class="btn pri" id="mrestart">Restart Mujina Now</button>
+      </div>
+
+      <div class="msg" id="smsg"></div>
+      <div class="acts">
+        <button class="btn" id="scancel">Cancel</button>
+        <button class="btn pri" id="ssave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Embedded Per-Board Controls Modal Sub-Menu (Triggered via ⚙ Tune Button) -->
+  <div class="modal" id="boardControlModal">
+    <div class="sheet">
+      <h2>Board Controls</h2>
+      <div class="subhead" id="bcModalSubhead">Tuning &amp; Fan Settings</div>
+
+      <div class="modalsec">Fan Control</div>
+      <div class="row">
+        <label for="fauto">Automatic Fan Control</label>
+        <label class="sw"><input type="checkbox" id="fauto"><span></span></label>
+      </div>
+      <div class="row" id="row_target">
+        <label for="ftarget">Target Temperature</label>
+        <div><input type="number" id="ftarget" min="40" max="90" step="1"> <small style="color:var(--dim)">°C</small></div>
+      </div>
+      <div class="row" id="row_min">
+        <label for="fmin">Minimum Fan Speed</label>
+        <div><input type="number" id="fmin" min="0" max="100" step="1"> <small style="color:var(--dim)">%</small></div>
+      </div>
+      <div class="row hide" id="row_manual">
+        <label for="fmanual">Fan Speed</label>
+        <div><input type="number" id="fmanual" min="0" max="100" step="1"> <small style="color:var(--dim)">%</small></div>
+      </div>
+
+      <div class="modalsec">Frequency / Voltage</div>
+      <div class="note">Manual override — applies live. Clamped to safe ranges (490–650 MHz, 1150–1300 mV). Disabled while auto-tuning.</div>
+      <div class="fvgroup" id="fvgroup">
+        <div class="fvcell">
+          <label for="vfreq">Frequency <small style="color:var(--dim)">MHz</small></label>
+          <input type="number" id="vfreq" min="490" max="650" step="5">
+        </div>
+        <div class="fvdiv"></div>
+        <div class="fvcell">
+          <label for="vvolt">Core Voltage <small style="color:var(--dim)">mV</small></label>
+          <input type="number" id="vvolt" min="1150" max="1300" step="5">
+        </div>
+      </div>
+
+      <div class="modalsec">Auto-Tuning Config <span class="badge" style="color:var(--lime);border-color:rgba(200,255,0,.4)">90s thermal soak + HW error guard</span></div>
+      <div class="note">Tunes frequency &amp; voltage toward chosen profile within safe thermal/power limits. Calibrated points persist to disk (mujina-autotune.json).</div>
+      <div class="row">
+        <label for="vauto">Enable Auto-Tuning</label>
+        <label class="sw"><input type="checkbox" id="vauto"><span></span></label>
+      </div>
+      <div class="row">
+        <label for="vmode">Mode</label>
+        <select id="vmode">
+          <option value="profile">Profile</option>
+          <option value="target">Target</option>
+        </select>
+      </div>
+      <div class="row" id="row_profile">
+        <label for="vprofile">Profile</label>
+        <select id="vprofile">
+          <option value="eco_quiet">Eco-Quiet (Fan &lt;45%)</option>
+          <option value="quiet">Quiet</option>
+          <option value="efficient">Efficient</option>
+          <option value="balanced">Balanced</option>
+          <option value="max_hash">Max Hash</option>
+        </select>
+      </div>
+      <div class="row" id="row_target_axis">
+        <label>Target Mode</label>
+        <div class="seg" id="segaxis">
+          <button type="button" class="segbtn" data-axis="power">Power Target</button>
+          <button type="button" class="segbtn" data-axis="hashrate">Hashrate Target</button>
+        </div>
+      </div>
+      <div class="row" id="row_target_value">
+        <label for="vtargetval" id="vtargetlabel">Target Power <small style="color:var(--dim)">W</small></label>
+        <input type="number" id="vtargetval" step="0.1">
+      </div>
+      <div class="note" id="targetrangenote" style="margin:-8px 0 12px"></div>
+
+      <div class="msg" id="bmsg"></div>
+      <div class="acts">
+        <button class="btn" id="bcClose">Close</button>
+        <button class="btn pri" id="bsave">Apply Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec">Fleet Overview<span class="sec-sub" id="fleetsub"></span></div>
+  
+  <!-- Fleet Board Summary Cards -->
+  <div class="board-summary-grid" id="boardSummaryGrid"></div>
+
+  <div class="grid" id="fleetGrid">
+    <div class="card hero fhr" id="heroFhrCard">
+      <svg class="hero-sparkline-svg" id="heroSparklineSvg" viewBox="0 0 300 100" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="heroSparkGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#00f0ff" stop-opacity="0.32" />
+            <stop offset="100%" stop-color="#00f0ff" stop-opacity="0.00" />
+          </linearGradient>
+          <filter id="heroGlow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="2.5" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+        <path id="sparkPathArea" fill="url(#heroSparkGradient)" d="" />
+        <path id="sparkPathLine" fill="none" stroke="#00f0ff" stroke-width="2.5" filter="url(#heroGlow)" stroke-linecap="round" stroke-linejoin="round" d="" />
+      </svg>
+      <div class="hero-inner-content">
+        <div class="label">Fleet Hashrate</div>
+        <div class="val" id="fhr">—</div>
+        <div class="sub" id="fhrsub"></div>
+      </div>
+    </div>
+    <div class="card freq span2">
+      <div class="dual">
+        <div class="dcell"><div class="label">Avg Chip Frequency</div><div class="val" id="ffreq">—</div></div>
+        <div class="dcell"><div class="label">Avg Core Voltage</div><div class="val" id="fcorev">—</div></div>
+      </div>
+    </div>
+    <div class="card temp span2">
+      <div class="dual">
+        <div class="dcell"><div class="label">Avg ASIC Temp</div><div class="val" id="fasic">—</div></div>
+        <div class="dcell"><div class="label">Avg VR Temp</div><div class="val" id="fvr">—</div></div>
+      </div>
+    </div>
+    <div class="card eff"><div class="label">Fleet Efficiency</div><div class="val" id="feff">—</div></div>
+    <div class="card"><div class="label">Boards Online</div><div class="val" id="fboards">—</div></div>
+    <div class="card"><div class="label">Total Power</div><div class="val" id="fpower">—</div></div>
+    <div class="card fan"><div class="label">Avg Fan</div><div class="val" id="ffan">—</div></div>
+    <div class="card pool span2">
+      <div class="label">Pool</div>
+      <div class="val" id="pool">—</div>
+      <div class="poolmeta">
+        <span>Shares<b id="shares">—</b></span>
+        <span>Difficulty<b id="diff">—</b></span>
+        <span>Best Share<b id="bestdiff" style="color:var(--lime)">—</b></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="chartcard">
+    <div class="label">Fleet Hashrate History // Multi-Board Line &amp; Stacked Graph (Hover to inspect)</div>
+    <div class="chartwrap">
+      <canvas id="fleetChart"></canvas>
+    </div>
+    <div class="chartlegend" id="fleetChartLegend">
+      <span class="lg"><i class="sw sw-solid" style="border-color:var(--cyan);box-shadow:0 0 6px var(--cyan)"></i>Fleet Aggregate</span>
+      <span class="lg"><i class="sw sw-dash"></i>Moving Avg (10)</span>
+    </div>
+  </div>
+
+  <div class="sec">Board Diagnostics<span class="sec-sub" id="boardsub"></span></div>
+  <div class="boardtabs" id="boardTabs"></div>
+
+  <div class="grid">
+    <div class="card hero hr">
+      <div class="label" id="boardhrlabel">Hashrate</div>
+      <div class="herobody">
+        <div class="heromain"><div class="val" id="hr">—</div></div>
+        <div class="heroside" id="chipcard" style="display:none">
+          <div class="chip-toolbar">
+            <div class="chiplabel">ASIC Health Grid Matrix</div>
+            <div class="chipfilters" id="chipFilterBtns">
+              <button class="cfilterbtn active" data-filter="all">All</button>
+              <button class="cfilterbtn" data-filter="lazy">Lazy</button>
+            </div>
+          </div>
+          <div id="chips"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card freq span2">
+      <div class="dual">
+        <div class="dcell"><div class="label">Frequency</div><div class="val" id="freq">—</div></div>
+        <div class="dcell"><div class="label">Core Voltage</div><div class="val" id="corev">—</div></div>
+      </div>
+    </div>
+    <div class="card temp span2">
+      <div class="dual">
+        <div class="dcell"><div class="label">ASIC Temp</div><div class="val" id="asic">—</div></div>
+        <div class="dcell"><div class="label">VR Temp</div><div class="val" id="vr">—</div></div>
+      </div>
+    </div>
+
+    <div class="card eff"><div class="label">Efficiency</div><div class="val" id="eff">—</div></div>
+    <div class="card"><div class="label">ASIC Core Power</div><div class="val" id="corew">—</div></div>
+    <div class="card"><div class="label">Core Current</div><div class="val" id="corea">—</div></div>
+    <div class="card"><div class="label">Input Voltage</div><div class="val" id="inputv">—</div></div>
+
+    <div class="card fan"><div class="label">Fan</div><div class="val" id="fan">—</div></div>
+    <div class="card span2">
+      <div class="label">Board</div>
+      <div class="val" id="boardmeta" style="font-size:15px">—</div>
+    </div>
+
+    <!-- Prominent Auto-Tuner Live Terminal Console -->
+    <div class="card span4" style="margin-top:4px">
+      <div class="label">// AUTO-TUNER LIVE ACTIVITY &amp; CALIBRATION LOG</div>
+      <div class="at-console">
+        <div class="at-console-header">
+          <span class="at-title">Status: <span id="at-phase-label">HOLDING</span></span>
+          <span class="at-best-badge" id="atbest">No calibration point established yet</span>
+        </div>
+        <div class="at-feed" id="atlist">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="chartcard">
+    <div class="label">Board Hashrate History // GH/s (Hover to inspect)</div>
+    <div class="chartwrap">
+      <canvas id="chart"></canvas>
+    </div>
+    <div class="chartlegend">
+      <span class="lg"><i class="sw sw-solid"></i>Board Hashrate</span>
+      <span class="lg"><i class="sw sw-dash"></i>Moving Avg (10)</span>
+    </div>
+  </div>
+
+  <div class="status" id="status">
+    <span id="statusleft"><span class="dot off"></span>connecting…</span>
+    <span id="statusuptime">—</span>
+    <span id="statuspath">D:\mujina-run\dashboard.html (Live Disk Reload Enabled)</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fx = (v, u, d = 2) => v == null ? '—' : (+v).toFixed(d) + ' <small>' + u + '</small>';
+let LAST = null, ACTIVE_NAME = null, CHIP_FILTER = 'all';
+let MOUSE_POS = { fleetChart: null, chart: null };
+
+// Hardware Model Color Palette Mapping
+// Pink (#ff2e97) for NerdQAxe++ (4-chip multi-ASIC)
+// Yellow (#ffb000) for Bitaxe / NerdAxe (single-chip)
+function getBoardColor(b) {
+  if (!b) return '#00f0ff';
+  const name = ((b.board_name || '') + ' ' + (b.model || '')).toLowerCase();
+  const chipCount = (b.chips || []).length || b.thread_count || 1;
+
+  if (name.includes('nerdqaxe') || name.includes('nq++') || chipCount === 4) {
+    return '#ff2e97'; // Pink / Magenta for NerdQAxe++ 4-chip
+  }
+  if (name.includes('bitaxe') || name.includes('nerdaxe') || chipCount === 1) {
+    return '#ffb000'; // Yellow / Amber for Bitaxe & single-chip
+  }
+  return '#00f0ff'; // Cyan default
+}
+
+function movingAvg(arr, w) {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const s = Math.max(0, i - w + 1);
+    let sum = 0, n = 0;
+    for (let j = s; j <= i; j++) { sum += arr[j]; n++; }
+    out.push(sum / n);
+  }
+  return out;
+}
+
+function attachChartHover(canvasId) {
+  const c = $(canvasId);
+  if (!c || c._hoverAttached) return;
+  c._hoverAttached = true;
+  c.addEventListener('mousemove', e => {
+    const rect = c.getBoundingClientRect();
+    MOUSE_POS[canvasId] = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    if (LAST) render(LAST);
+  });
+  c.addEventListener('mouseleave', () => {
+    MOUSE_POS[canvasId] = null;
+    if (LAST) render(LAST);
+  });
+}
+
+// Multi-board Line Chart for Fleet with Model-Specific Color Mapping
+function drawFleetChart(canvasId, boards, fleetSeries) {
+  attachChartHover(canvasId);
+  const c = $(canvasId), dpr = devicePixelRatio || 1;
+  const w = c.clientWidth, h = 160; c.width = w * dpr; c.height = h * dpr;
+  const x = c.getContext('2d'); x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
+  
+  x.strokeStyle = 'rgba(0,240,255,.08)'; x.lineWidth = 1;
+  for (let gy = 0; gy <= 4; gy++) { const yy = gy * h / 4; x.beginPath(); x.moveTo(0, yy); x.lineTo(w, yy); x.stroke(); }
+  if (!fleetSeries || fleetSeries.length < 2) {
+    x.fillStyle = '#4a6a86'; x.font = "12px 'Share Tech Mono',monospace"; x.fillText('awaiting samples…', 10, 24); return;
+  }
+
+  const max = Math.max(...fleetSeries) * 1.05 || 1, min = Math.min(...fleetSeries) * 0.97;
+  const rng = (max - min) || 1, pad = 6;
+  const px = i => pad + i * (w - 2 * pad) / (fleetSeries.length - 1);
+  const py = v => h - pad - (v - min) / rng * (h - 2 * pad);
+  const fmtGh = v => (v >= 1000) ? (v / 1000).toFixed(2) + ' TH/s' : v.toFixed(0) + ' GH/s';
+
+  // Y-axis labels
+  x.fillStyle = '#4a6a86'; x.font = "9px 'Share Tech Mono',monospace"; x.textAlign = 'left';
+  for (let gy = 0; gy <= 4; gy++) {
+    const yy = gy * h / 4, val = max - gy * (max - min) / 4;
+    const ly = gy === 0 ? 10 : (gy === 4 ? h - 3 : yy + 3);
+    x.fillText(fmtGh(val), 4, ly);
+  }
+
+  // Update Dynamic Legend with Model Colors
+  let legendHtml = `<span class="lg"><i class="sw sw-solid" style="border-color:var(--cyan);box-shadow:0 0 6px var(--cyan)"></i>Fleet Aggregate</span>`;
+  (boards || []).forEach((b) => {
+    const col = getBoardColor(b);
+    legendHtml += `<span class="lg"><i class="sw sw-solid" style="border-color:${col};box-shadow:0 0 6px ${col}"></i>${(b.board_name || 'Board').toUpperCase()}</span>`;
+  });
+  legendHtml += `<span class="lg"><i class="sw sw-dash"></i>Moving Avg</span>`;
+  $('fleetChartLegend').innerHTML = legendHtml;
+
+  // Draw per-board series lines
+  (boards || []).forEach((b) => {
+    const series = b.series || [];
+    if (series.length < 2) return;
+    const col = getBoardColor(b);
+    x.strokeStyle = col; x.lineWidth = 1.5; x.shadowColor = col; x.shadowBlur = 6; x.beginPath();
+    series.forEach((v, i) => { i ? x.lineTo(px(i), py(v)) : x.moveTo(px(i), py(v)); });
+    x.stroke(); x.shadowBlur = 0;
+  });
+
+  // Draw Fleet Aggregate Area + Line
+  const grad = x.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, 'rgba(0,240,255,.18)'); grad.addColorStop(1, 'rgba(0,240,255,0)');
+  x.beginPath(); fleetSeries.forEach((v, i) => { i ? x.lineTo(px(i), py(v)) : x.moveTo(px(i), py(v)); });
+  x.lineTo(px(fleetSeries.length - 1), h - pad); x.lineTo(px(0), h - pad); x.closePath(); x.fillStyle = grad; x.fill();
+
+  const ma = movingAvg(fleetSeries, 10);
+  x.strokeStyle = 'rgba(0,240,255,.32)'; x.lineWidth = 1.25; x.setLineDash([5, 4]); x.beginPath();
+  ma.forEach((v, i) => { i ? x.lineTo(px(i), py(v)) : x.moveTo(px(i), py(v)); }); x.stroke(); x.setLineDash([]);
+
+  x.strokeStyle = '#00f0ff'; x.lineWidth = 2.5; x.shadowColor = '#00f0ff'; x.shadowBlur = 10; x.beginPath();
+  fleetSeries.forEach((v, i) => { i ? x.lineTo(px(i), py(v)) : x.moveTo(px(i), py(v)); }); x.stroke(); x.shadowBlur = 0;
+
+  // Hover Crosshair with Per-Board Breakdown
+  const hover = MOUSE_POS[canvasId];
+  if (hover && hover.x >= 0 && hover.x <= w) {
+    let closestIdx = 0, minDist = Infinity;
+    fleetSeries.forEach((_, i) => {
+      const dist = Math.abs(px(i) - hover.x);
+      if (dist < minDist) { minDist = dist; closestIdx = i; }
+    });
+    const hx = px(closestIdx), hy = py(fleetSeries[closestIdx]);
+
+    x.strokeStyle = 'rgba(255,46,151,.7)'; x.lineWidth = 1; x.setLineDash([3, 3]);
+    x.beginPath(); x.moveTo(hx, 0); x.lineTo(hx, h); x.moveTo(0, hy); x.lineTo(w, hy); x.stroke(); x.setLineDash([]);
+
+    x.fillStyle = '#ff2e97'; x.shadowColor = '#ff2e97'; x.shadowBlur = 10;
+    x.beginPath(); x.arc(hx, hy, 4, 0, Math.PI * 2); x.fill(); x.shadowBlur = 0;
+
+    let tipText = `Fleet: ${fmtGh(fleetSeries[closestIdx])}`;
+    (boards || []).forEach(b => {
+      if (b.series && closestIdx < b.series.length && typeof b.series[closestIdx] === 'number') {
+        tipText += ` | ${b.board_name}: ${fmtGh(b.series[closestIdx])}`;
+      }
+    });
+
+    x.font = "bold 11px 'Share Tech Mono',monospace";
+    const tw = x.measureText(tipText).width + 14;
+    const tx = Math.min(Math.max(hx - tw / 2, 4), w - tw - 4);
+    const ty = Math.max(hy - 24, 16);
+    x.fillStyle = '#0a0f1c'; x.strokeStyle = '#ff2e97'; x.lineWidth = 1;
+    x.fillRect(tx, ty - 12, tw, 18); x.strokeRect(tx, ty - 12, tw, 18);
+    x.fillStyle = '#fff'; x.textAlign = 'center'; x.fillText(tipText, tx + tw / 2, ty + 1);
+  } else {
+    const lastV = fleetSeries[fleetSeries.length - 1], lx = px(fleetSeries.length - 1), ly2 = py(lastV);
+    x.fillStyle = '#00f0ff'; x.shadowColor = '#00f0ff'; x.shadowBlur = 8;
+    x.beginPath(); x.arc(lx, ly2, 3, 0, Math.PI * 2); x.fill(); x.shadowBlur = 0;
+    x.font = "bold 11px 'Share Tech Mono',monospace"; x.fillStyle = '#fff'; x.textAlign = 'right';
+    x.fillText(fmtGh(lastV), lx - 8, Math.max(11, Math.min(h - 6, ly2 - 8)));
+  }
+}
+
+function drawChart(canvasId, series, color = '#00f0ff') {
+  attachChartHover(canvasId);
+  const c = $(canvasId), dpr = devicePixelRatio || 1;
+  const w = c.clientWidth, h = 160; c.width = w * dpr; c.height = h * dpr;
+  const x = c.getContext('2d'); x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
+  
+  x.strokeStyle = 'rgba(0,240,255,.08)'; x.lineWidth = 1;
+  for (let gy = 0; gy <= 4; gy++) { const yy = gy * h / 4; x.beginPath(); x.moveTo(0, yy); x.lineTo(w, yy); x.stroke(); }
+  if (series.length < 2) {
+    x.fillStyle = '#4a6a86'; x.font = "12px 'Share Tech Mono',monospace"; x.fillText('awaiting samples…', 10, 24); return;
+  }
+  const max = Math.max(...series) * 1.05 || 1, min = Math.min(...series) * 0.97;
+  const rng = (max - min) || 1, pad = 6;
+  const px = i => pad + i * (w - 2 * pad) / (series.length - 1);
+  const py = v => h - pad - (v - min) / rng * (h - 2 * pad);
+  const fmtGh = v => (v >= 1000) ? (v / 1000).toFixed(2) + ' TH/s' : v.toFixed(0) + ' GH/s';
+
+  x.fillStyle = '#4a6a86'; x.font = "9px 'Share Tech Mono',monospace"; x.textAlign = 'left';
+  for (let gy = 0; gy <= 4; gy++) {
+    const yy = gy * h / 4, val = max - gy * (max - min) / 4;
+    const ly = gy === 0 ? 10 : (gy === 4 ? h - 3 : yy + 3);
+    x.fillText(fmtGh(val), 4, ly);
+  }
+
+  const grad = x.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, 'rgba(0,240,255,.22)'); grad.addColorStop(1, 'rgba(0,240,255,0)');
+  x.beginPath(); series.forEach((v, i) => { i ? x.lineTo(px(i), py(v)) : x.moveTo(px(i), py(v)); });
+  x.lineTo(px(series.length - 1), h - pad); x.lineTo(px(0), h - pad); x.closePath(); x.fillStyle = grad; x.fill();
+
+  const ma = movingAvg(series, 10);
+  x.strokeStyle = 'rgba(0,240,255,.32)'; x.lineWidth = 1.25; x.setLineDash([5, 4]); x.beginPath();
+  ma.forEach((v, i) => { i ? x.lineTo(px(i), py(v)) : x.moveTo(px(i), py(v)); }); x.stroke(); x.setLineDash([]);
+
+  x.strokeStyle = color; x.lineWidth = 2; x.shadowColor = color; x.shadowBlur = 8; x.beginPath();
+  series.forEach((v, i) => { i ? x.lineTo(px(i), py(v)) : x.moveTo(px(i), py(v)); }); x.stroke(); x.shadowBlur = 0;
+
+  // Interactive Hover Crosshair
+  const hover = MOUSE_POS[canvasId];
+  if (hover && hover.x >= 0 && hover.x <= w) {
+    let closestIdx = 0, minDist = Infinity;
+    series.forEach((_, i) => {
+      const dist = Math.abs(px(i) - hover.x);
+      if (dist < minDist) { minDist = dist; closestIdx = i; }
+    });
+    const hx = px(closestIdx), hy = py(series[closestIdx]);
+    
+    x.strokeStyle = 'rgba(255,46,151,.7)'; x.lineWidth = 1; x.setLineDash([3, 3]);
+    x.beginPath(); x.moveTo(hx, 0); x.lineTo(hx, h); x.moveTo(0, hy); x.lineTo(w, hy); x.stroke(); x.setLineDash([]);
+
+    x.fillStyle = '#ff2e97'; x.shadowColor = '#ff2e97'; x.shadowBlur = 10;
+    x.beginPath(); x.arc(hx, hy, 4, 0, Math.PI * 2); x.fill(); x.shadowBlur = 0;
+
+    const tipText = fmtGh(series[closestIdx]);
+    x.font = "bold 11px 'Share Tech Mono',monospace";
+    const tw = x.measureText(tipText).width + 12;
+    const tx = Math.min(Math.max(hx - tw / 2, 4), w - tw - 4);
+    const ty = Math.max(hy - 24, 16);
+    x.fillStyle = '#0a0f1c'; x.strokeStyle = '#ff2e97'; x.lineWidth = 1;
+    x.fillRect(tx, ty - 12, tw, 18); x.strokeRect(tx, ty - 12, tw, 18);
+    x.fillStyle = '#fff'; x.textAlign = 'center'; x.fillText(tipText, tx + tw / 2, ty + 1);
+  } else {
+    const lastV = series[series.length - 1], lx = px(series.length - 1), ly2 = py(lastV);
+    x.fillStyle = color; x.shadowColor = color; x.shadowBlur = 8;
+    x.beginPath(); x.arc(lx, ly2, 3, 0, Math.PI * 2); x.fill(); x.shadowBlur = 0;
+    x.font = "bold 11px 'Share Tech Mono',monospace"; x.fillStyle = '#fff'; x.textAlign = 'right';
+    x.fillText(fmtGh(lastV), lx - 8, Math.max(11, Math.min(h - 6, ly2 - 8)));
+  }
+}
+
+function renderBoardSummaryCards(boards) {
+  const grid = $('boardSummaryGrid');
+  if (!boards || !boards.length) { grid.innerHTML = ''; return; }
+
+  grid.innerHTML = boards.map((b) => {
+    const chips = b.chips || [];
+    const peak = chips.length ? (Math.max(...chips.map(c => c.ghs || 0)) || 1) : 1;
+    const weakCount = chips.filter(c => (c.ghs || 0) < (peak * 0.75)).length;
+    
+    let badgeText = chips.length ? `${chips.length - weakCount}/${chips.length} ASICs OK` : 'Online';
+    let badgeClass = weakCount > 0 ? 'warn' : 'ok';
+    if (weakCount > 0) badgeText += `, ${weakCount} Lazy`;
+
+    const isCurrentActive = b.board_name === ACTIVE_NAME;
+    const hrText = (b.hashrate_ghs == null) ? 'n/a'
+      : ((b.hashrate_ghs >= 1000) ? b.hashrate_ths.toFixed(2) + ' TH/s' : b.hashrate_ghs.toFixed(2) + ' GH/s');
+
+    const boardCol = getBoardColor(b);
+
+    return `
+      <div class="bs-card ${isCurrentActive ? 'active-card' : ''}" onclick="selectBoard('${b.board_name}')" style="border-left: 3px solid ${boardCol}">
+        <div class="bs-top">
+          <div>
+            <div class="bs-name" style="color:${boardCol}">${b.board_name || 'Board'}</div>
+            <div class="bs-model">${b.model || 'Mujina Board'}</div>
+          </div>
+          <span class="bs-badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="bs-hr">${hrText}</div>
+        <div class="bs-meta">
+          <span>Freq: ${b.freq_mhz ? b.freq_mhz + ' MHz' : '—'}</span>
+          <span>Eff: ${b.efficiency_jth ? b.efficiency_jth + ' J/TH' : '—'}</span>
+          <span>Temp: ${b.asic_c ? b.asic_c + '°C' : '—'}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function selectBoard(name) {
+  ACTIVE_NAME = name;
+  if (LAST) render(LAST);
+  const target = $('boardsub');
+  if (target) target.scrollIntoView({ behavior: 'smooth' });
+}
+
+function renderChips(chips) {
+  const card = $('chipcard');
+  if (!chips || !chips.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  const peak = chips.length ? (Math.max(...chips.map(c => c.ghs || 0)) || 1) : 1;
+
+  let filteredChips = chips;
+  if (CHIP_FILTER === 'lazy') {
+    filteredChips = chips.filter(c => (c.ghs || 0) < (peak * 0.75));
+  }
+
+  if (!filteredChips.length) {
+    $('chips').innerHTML = '<div style="font-size:11px;color:var(--dim);padding:10px 0">No chips match filter.</div>';
+    return;
+  }
+
+  $('chips').innerHTML = '<div class="chipgrid">' + filteredChips.map(c => {
+    const ghs = c.ghs || 0;
+    const isWeak = ghs < (peak * 0.75);
+    const cls = isWeak ? ' weak' : '';
+    return '<div class="chiptile' + cls + '">'
+      + '<div class="ctname">ASIC ' + c.index + '</div>'
+      + '<div class="ctstat">' + (ghs / 1000).toFixed(2) + ' <small>TH/s</small></div>'
+      + '</div>';
+  }).join('') + '</div>';
+}
+
+function renderFans(fans) {
+  if (!fans || !fans.length) return '—';
+  if (fans.length === 1) {
+    const f = fans[0];
+    return (f.rpm != null) ? f.rpm + ' <small>RPM' + (f.percent != null ? (' · ' + f.percent + '%') : '') + '</small>' : '—';
+  }
+  return '<div class="fanlist">' + fans.map((f, i) => {
+    const name = (f.name || ('FAN ' + (i + 1))).replace(/^fan[_-]?/i, 'FAN ').toUpperCase();
+    const rpm = (f.rpm != null) ? f.rpm : '—';
+    const pct = (f.percent != null) ? (' · ' + f.percent + '%') : '';
+    return '<div class="fanrow"><span class="fname">' + name + '</span><span class="fstat">' + rpm + ' <small>RPM' + pct + '</small></span></div>';
+  }).join('') + '</div>';
+}
+
+function boardDot(b) {
+  if (b.asic_c != null && b.asic_c >= 75) return 'crit';
+  if ((b.asic_c != null && b.asic_c >= 65) || b.fan_pct === 100) return 'warn';
+  return 'ok';
+}
+
+function openBoardControlModal() {
+  const b = activeBoard();
+  if (b) {
+    const bColor = getBoardColor(b);
+    $('bcModalSubhead').textContent = `Tuning & Fan Controls · ${b.board_name.toUpperCase()}`;
+    $('bcModalSubhead').style.color = bColor;
+    fillBoardForm(b);
+  }
+  $('bmsg').textContent = ''; $('bmsg').className = 'msg';
+  $('boardControlModal').classList.add('show');
+}
+function closeBoardControlModal() {
+  $('boardControlModal').classList.remove('show');
+}
+
+function renderTabs(boards) {
+  if (ACTIVE_NAME == null || !boards.some(b => b.board_name === ACTIVE_NAME)) {
+    ACTIVE_NAME = boards.length ? boards[0].board_name : null;
+  }
+  
+  let tabsHtml = boards.map((b, i) => {
+    const isAct = b.board_name === ACTIVE_NAME;
+    const bColor = getBoardColor(b);
+    const borderStyle = isAct ? `border-color:${bColor};box-shadow:0 0 12px ${bColor}33 inset` : '';
+    return `
+      <div class="btab ${isAct ? 'active' : ''}" data-name="${b.board_name || ''}" style="${borderStyle}">
+        <span class="tdot ${boardDot(b)}"></span>${(b.board_name || ('board-' + (i + 1))).toUpperCase()}
+      </div>`;
+  }).join('');
+
+  // Add the ⚙ Tune Board Sub-menu Trigger Icon Button on the tab bar
+  tabsHtml += `<button class="btab-tune-btn" id="btnTuneCurrentBoard" onclick="openBoardControlModal()" title="Board Tuning & Fan Controls">⚙ Tune ${ACTIVE_NAME ? ACTIVE_NAME.toUpperCase() : 'BOARD'}</button>`;
+  $('boardTabs').innerHTML = tabsHtml;
+
+  $('boardTabs').querySelectorAll('.btab').forEach(el => {
+    el.addEventListener('click', () => {
+      ACTIVE_NAME = el.dataset.name;
+      if (LAST) render(LAST);
+    });
+  });
+}
+
+function checkAlerts(d) {
+  const banner = $('alertBanner'), text = $('alertText');
+  let alerts = [];
+  (d.boards || []).forEach(b => {
+    if (b.asic_c != null && b.asic_c >= 70) alerts.push(`${b.board_name} ASIC Temp High (${b.asic_c}°C)`);
+    if (b.vr_c != null && b.vr_c >= 80) alerts.push(`${b.board_name} VR Temp High (${b.vr_c}°C)`);
+  });
+  if (alerts.length) {
+    banner.classList.add('show');
+    text.textContent = '⚠️ ' + alerts.join(' · ');
+  } else {
+    banner.classList.remove('show');
+  }
+}
+
+function drawHeroSparkline(series) {
+  const linePath = $('sparkPathLine');
+  const areaPath = $('sparkPathArea');
+  if (!linePath || !areaPath) return;
+
+  if (!series || series.length < 2) {
+    linePath.setAttribute('d', '');
+    areaPath.setAttribute('d', '');
+    return;
+  }
+
+  // De-step duplicate telemetry plateaus to find true trajectory changes
+  const dedupped = [];
+  series.forEach((val, i) => {
+    if (i === 0 || Math.abs(val - series[i - 1]) > 0.05) {
+      dedupped.push(val);
+    }
+  });
+
+  const raw = dedupped.length >= 3 ? dedupped.slice(-30) : series.slice(-30);
+
+  // 2-pass weighted Gaussian/moving average smoothing filter to remove step artifacts
+  let data = [...raw];
+  for (let pass = 0; pass < 2; pass++) {
+    const next = [];
+    for (let i = 0; i < data.length; i++) {
+      let sum = 0, count = 0;
+      for (let j = Math.max(0, i - 2); j <= Math.min(data.length - 1, i + 2); j++) {
+        const weight = (j === i) ? 2 : 1;
+        sum += data[j] * weight;
+        count += weight;
+      }
+      next.push(sum / count);
+    }
+    data = next;
+  }
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = (max - min) || 1;
+
+  const width = 300;
+  const height = 100;
+  const paddingY = 18;
+
+  const points = data.map((val, idx) => {
+    const x = (idx / (data.length - 1)) * width;
+    const normalizedY = (val - min) / range;
+    const y = height - paddingY - (normalizedY * (height - 2 * paddingY));
+    return { x, y };
+  });
+
+  // Smooth Catmull-Rom cubic bezier curve for continuous natural flow
+  let dLine = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
+
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+
+    dLine += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+  }
+
+  const lastPoint = points[points.length - 1];
+  const firstPoint = points[0];
+  const dArea = `${dLine} L ${lastPoint.x.toFixed(1)} ${height} L ${firstPoint.x.toFixed(1)} ${height} Z`;
+
+  linePath.setAttribute('d', dLine);
+  areaPath.setAttribute('d', dArea);
+}
+
+function renderFleet(d) {
+  const f = d.fleet;
+  $('fleetsub').textContent = f.boards_online + ' BOARD' + (f.boards_online === 1 ? '' : 'S') + ' REPORTING';
+  $('fhr').innerHTML = (f.hashrate_ghs >= 1000) ? f.hashrate_ths.toFixed(2) + ' <small>TH/s</small>' : f.hashrate_ghs.toFixed(2) + ' <small>GH/s</small>';
+  $('fhrsub').textContent = f.boards_online + ' board' + (f.boards_online === 1 ? '' : 's') + ' online';
+  $('ffreq').innerHTML = (f.avg_freq_mhz != null) ? (+f.avg_freq_mhz).toFixed(0) + ' <small>MHz</small>' : '<span class="na">n/a</span>';
+  $('fcorev').innerHTML = fx(f.avg_core_v, 'V', 3);
+  $('fasic').innerHTML = fx(f.avg_asic_c, '°C', 1);
+  $('fvr').innerHTML = fx(f.avg_vr_c, '°C', 1);
+  $('feff').innerHTML = fx(f.efficiency_jth, 'J/TH', 2);
+  $('fboards').textContent = f.boards_online;
+  $('fpower').innerHTML = fx(f.total_power_w, 'W', 1);
+  $('ffan').innerHTML = (f.avg_fan_rpm != null) ? Math.round(f.avg_fan_rpm) + ' <small>RPM</small>' : '—';
+  $('pool').textContent = d.pool_url || d.pool_name || '—';
+  $('shares').textContent = (d.shares != null) ? d.shares : '—';
+  $('diff').textContent = (d.difficulty != null) ? d.difficulty : '—';
+  $('bestdiff').textContent = (d.best_diff != null) ? d.best_diff : '—';
+  
+  renderBoardSummaryCards(d.boards);
+  drawFleetChart('fleetChart', d.boards, f.series || []);
+  drawHeroSparkline(f.series || []);
+  checkAlerts(d);
+}
+
+const PROFILES = { eco_quiet: 'Eco-Quiet', quiet: 'Quiet', efficient: 'Efficient', balanced: 'Balanced', max_hash: 'Max Hash' };
+function renderAutolog(at, bestId, listId) {
+  if (!at) { $(listId).textContent = '—'; $(bestId).textContent = 'No calibration point established yet'; $('at-phase-label').textContent = 'IDLE'; return; }
+  const b = at.best;
+  $(bestId).textContent = b ? ('Best Point: ' + Math.round(b.frequency_mhz) + ' MHz @ ' + b.core_voltage_mv + ' mV'
+    + (at.efficiency_j_th ? (' · ' + at.efficiency_j_th.toFixed(1) + ' J/TH') : '')) : 'No calibration point established yet';
+  $('at-phase-label').textContent = (at.phase || (at.enabled ? 'tuning' : 'idle')).replace('_', ' ').toUpperCase();
+  const log = (at.log || []);
+  if (!log.length) { $(listId).textContent = at.enabled ? 'Warming up thermal soak & telemetry windows…' : 'Auto-tuner is idle. Enable in board controls menu (⚙ Tune Board) to calibrate.'; return; }
+  $(listId).innerHTML = log.slice().reverse().map(e =>
+    '<div class="entry"><b>[' + (e.timestamp ? new Date(e.timestamp * 1000).toLocaleTimeString() : 'LOG') + ']</b> <i>' + Math.round(e.frequency_mhz) + 'MHz</i> <span>' + e.message + '</span></div>').join('');
+}
+
+function autotuneLabel(at) {
+  if (at && at.target) {
+    return at.target.axis === 'power' ? (at.target.value.toFixed(1) + 'W target') : (at.target.value.toFixed(0) + 'TH/s target');
+  }
+  return PROFILES[at && at.profile] || (at && at.profile);
+}
+
+function renderAutotune(at) {
+  const on = at && at.enabled;
+  $('atpill').classList.toggle('on', !!on);
+  if (on) {
+    const ph = (at.phase || '').replace('_', ' ');
+    $('atpilltxt').textContent = 'auto · ' + autotuneLabel(at) + ' · ' + ph;
+  }
+}
+
+function renderBoard(b) {
+  const online = !!b;
+  $('boardhrlabel').textContent = online ? ('Hashrate — ' + (b.board_name || 'board')) : 'Hashrate';
+  if (!online) { $('hr').innerHTML = '<span class="na">offline</span>'; renderChips(null); return; }
+  $('hr').innerHTML = (b.hashrate_ghs == null) ? '<span class="na">n/a</span>'
+    : ((b.hashrate_ghs >= 1000) ? b.hashrate_ths.toFixed(2) + ' <small>TH/s</small>' : b.hashrate_ghs.toFixed(2) + ' <small>GH/s</small>');
+  $('freq').innerHTML = (b.freq_mhz != null) ? (+b.freq_mhz).toFixed(0) + ' <small>MHz</small>' : '<span class="na">n/a</span>';
+  $('corev').innerHTML = fx(b.core_v, 'V', 3);
+  $('corew').innerHTML = fx(b.core_w, 'W');
+  $('corea').innerHTML = fx(b.core_a, 'A', 2);
+  $('inputv').innerHTML = fx(b.input_v, 'V', 2);
+  $('eff').innerHTML = fx(b.efficiency_jth, 'J/TH', 2);
+  $('asic').innerHTML = fx(b.asic_c, '°C', 1);
+  $('vr').innerHTML = fx(b.vr_c, '°C', 1);
+  $('fan').innerHTML = renderFans(b.fans);
+  renderChips(b.chips);
+  $('boardmeta').textContent = (b.model || '—') + (b.serial ? (' · ' + b.serial) : '');
+  
+  // Model-specific color assignment for single-board chart and glow
+  const bColor = getBoardColor(b);
+  drawChart('chart', b.series || [], bColor);
+  renderAutotune(b.autotune);
+}
+
+function render(d) {
+  renderFleet(d);
+  renderTabs(d.boards);
+  const b = d.boards.find(x => x.board_name === ACTIVE_NAME) || null;
+  renderBoard(b);
+  syncBoardForm(b);
+}
+
+async function tick() {
+  try {
+    const d = await (await fetch('/data')).json();
+    if (!d.ok) { $('statusleft').innerHTML = '<span class="dot off"></span>' + d.reason; return; }
+    LAST = d;
+    const fleetLabel = 'FLEET MONITOR — ' + d.fleet.boards_online + ' BOARD' + (d.fleet.boards_online === 1 ? '' : 'S');
+    $('tagline').textContent = d.miner_name ? (d.miner_name + ' — ' + fleetLabel) : fleetLabel;
+    $('statusuptime').textContent = d.uptime ? ('uptime ' + d.uptime) : '—';
+    render(d);
+    const live = d.fleet.hashrate_ghs > 0 && !d.paused;
+    const st = d.paused ? 'paused' : (d.fleet.hashrate_ghs > 0 ? 'mining' : 'idle');
+    $('statusleft').innerHTML = '<span class="dot ' + (live ? 'on' : 'off') + '"></span>' + st + ' // sync ' + new Date().toLocaleTimeString();
+  } catch (e) { $('statusleft').innerHTML = '<span class="dot off"></span>dashboard/API unavailable'; }
+}
+
+// Modal & Forms Sync
+function syncRows() {
+  const auto = $('fauto').checked;
+  $('row_target').classList.toggle('hide', !auto);
+  $('row_min').classList.toggle('hide', !auto);
+  $('row_manual').classList.toggle('hide', auto);
+}
+let TARGET_AXIS = 'power', LAST_RANGE = null;
+function syncTargetMode() {
+  const target = $('vmode').value === 'target';
+  $('row_profile').classList.toggle('hide', target);
+  $('row_target_axis').classList.toggle('hide', !target);
+  $('row_target_value').classList.toggle('hide', !target);
+}
+function setTargetAxis(axis) {
+  TARGET_AXIS = axis;
+  $('segaxis').querySelectorAll('.segbtn').forEach(b => b.classList.toggle('active', b.dataset.axis === axis));
+  const unit = axis === 'power' ? 'W' : 'TH/s';
+  $('vtargetlabel').innerHTML = 'Target ' + (axis === 'power' ? 'Power' : 'Hashrate') + ' <small style="color:var(--dim)">' + unit + '</small>';
+}
+function activeBoard() {
+  return (LAST && LAST.boards) ? (LAST.boards.find(b => b.board_name === ACTIVE_NAME) || null) : null;
+}
+let SETTINGS = null;
+function syncWorkerNote() {
+  const user = $('puser').value.trim(), name = $('mname').value.trim();
+  if (!user) { $('workernote').textContent = ''; return; }
+  const worker = name ? user + '.' + name : user;
+  const dup = !!name && user.toLowerCase().endsWith('.' + name.toLowerCase());
+  $('workernote').textContent = (dup ? '⚠ name already in the user field — ' : 'Worker sent to pool: ') + worker;
+  $('workernote').style.color = dup ? 'var(--amber)' : '';
+}
+async function loadSettings() {
+  try { SETTINGS = await (await fetch('/minersettings')).json(); } catch (e) { SETTINGS = null; }
+  const s = SETTINGS || {}, p = s.pool || {};
+  $('mname').value = s.name || '';
+  $('purl').value = p.url || '';
+  $('puser').value = p.user || '';
+  $('ppass').value = '';
+  $('ppass').placeholder = p.password_set ? 'unchanged' : 'x';
+  $('restartbadge').style.display = s.restart_required ? '' : 'none';
+  syncWorkerNote();
+}
+function openSettings() { loadSettings(); $('modalboard').textContent = 'applies to whole miner'; $('smsg').textContent = ''; $('smsg').className = 'msg'; $('modal').classList.add('show'); }
+function closeSettings() { $('modal').classList.remove('show'); }
+function syncAuto() { $('fvgroup').classList.toggle('locked', $('vauto').checked); }
+let BOARD_FORM_FOR = null;
+function fillBoardForm(d) {
+  if (!d) return;
+  const auto = (d.fan_auto != null) ? d.fan_auto : true;
+  $('fauto').checked = auto;
+  $('ftarget').value = (d.fan_target_c != null) ? Math.round(d.fan_target_c) : 60;
+  $('fmin').value = (d.fan_min_pct != null) ? d.fan_min_pct : 25;
+  $('fmanual').value = (d.fan_target_pct != null) ? d.fan_target_pct : (d.fan_pct != null ? d.fan_pct : 50);
+  $('vfreq').value = (d.freq_mhz != null) ? Math.round(d.freq_mhz) : 525;
+  $('vvolt').value = (d.core_v != null) ? Math.round(d.core_v * 1000) : 1150;
+  const at = d.autotune || {};
+  $('vauto').checked = !!at.enabled;
+  $('vmode').value = at.target ? 'target' : 'profile';
+  $('vprofile').value = at.profile || 'balanced';
+  LAST_RANGE = at.hashrate_target_range || null;
+  $('vtargetval').value = at.target ? at.target.value : '';
+  setTargetAxis(at.target ? at.target.axis : 'power');
+  $('bmsg').textContent = ''; $('bmsg').className = 'msg';
+  syncRows(); syncAuto(); syncTargetMode();
+  BOARD_FORM_FOR = d.board_name;
+}
+function syncBoardForm(d) {
+  if (!d) { BOARD_FORM_FOR = null; return; }
+  if (BOARD_FORM_FOR !== d.board_name) fillBoardForm(d);
+  else {
+    const at = d.autotune || {};
+    LAST_RANGE = at.hashrate_target_range || LAST_RANGE;
+    renderAutolog(at, 'atbest', 'atlist');
+  }
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return r.json();
+}
+async function launchDoom() {
+  try {
+    const j = await post('/doom/launch', {});
+    if (j.ok) {
+      window.open(j.detail || 'http://192.168.1.152:8080', '_blank');
+    } else {
+      alert('DOOM launch failed: ' + (j.detail || 'unknown error'));
+    }
+  } catch (e) {
+    alert('DOOM launch failed: ' + e);
+  }
+}
+async function restartMiner() {
+  if (!confirm('Restart Mujina now? Mining stops for a few seconds while both boards re-enumerate.')) return;
+  $('smsg').textContent = 'restarting — this takes ~15s…'; $('smsg').className = 'msg';
+  $('mrestart').disabled = true;
+  try {
+    const j = await post('/restart', {});
+    $('smsg').textContent = j.ok ? ('restarted ✓ — ' + (j.detail || '')) : ('restart failed: ' + (j.detail || 'error'));
+    $('smsg').className = j.ok ? 'msg ok' : 'msg';
+    if (j.ok) loadSettings();
+    tick();
+  } catch (e) { $('smsg').textContent = 'restart failed: ' + e; $('smsg').className = 'msg'; }
+  $('mrestart').disabled = false;
+}
+async function saveMinerSettings() {
+  const body = { name: $('mname').value };
+  const url = $('purl').value.trim(), user = $('puser').value.trim();
+  if (url || user) {
+    if (!url || !user) { $('smsg').textContent = 'pool URL and user are both required'; $('smsg').className = 'msg'; return; }
+    body.pool = { url: url, user: user };
+    const pass = $('ppass').value;
+    if (pass) body.pool.password = pass;
+  }
+  $('smsg').textContent = 'saving…'; $('smsg').className = 'msg';
+  try {
+    const j = await post('/minersettings', body);
+    if (!j.ok) { $('smsg').textContent = 'failed: ' + (j.detail || 'error'); $('smsg').className = 'msg'; return; }
+    SETTINGS = j.settings || null;
+    $('restartbadge').style.display = (SETTINGS && SETTINGS.restart_required) ? '' : 'none';
+    $('ppass').value = '';
+    $('smsg').textContent = (SETTINGS && SETTINGS.restart_required) ? 'saved — use Restart Mujina Now below to apply' : 'saved ✓';
+    $('smsg').className = 'msg ok';
+    tick();
+  } catch (e) { $('smsg').textContent = 'failed: ' + e; $('smsg').className = 'msg'; }
+}
+async function saveBoardSettings() {
+  const d = activeBoard();
+  if (!d) { $('bmsg').textContent = 'no board selected'; $('bmsg').className = 'msg'; return; }
+  const auto = $('fauto').checked;
+  const fan = { board_name: d.board_name, auto: auto };
+  if (auto) { fan.target_c = +$('ftarget').value; fan.min_percent = +$('fmin').value; }
+  else { fan.percent = +$('fmanual').value; }
+  const atOn = $('vauto').checked;
+  const at = { board_name: d.board_name, enabled: atOn };
+  if ($('vmode').value === 'target') { at.target = { axis: TARGET_AXIS, value: +$('vtargetval').value }; }
+  else { at.profile = $('vprofile').value; }
+  const tune = { board_name: d.board_name };
+  if (!atOn) {
+    const f = +$('vfreq').value, mv = +$('vvolt').value;
+    if (d.freq_mhz == null || Math.round(d.freq_mhz) !== f) tune.frequency_mhz = f;
+    if (d.core_v == null || Math.round(d.core_v * 1000) !== mv) tune.core_voltage_mv = mv;
+  }
+  const hasTune = ('frequency_mhz' in tune) || ('core_voltage_mv' in tune);
+  $('bmsg').textContent = hasTune ? 'applying (retuning may take a few seconds)…' : 'applying…'; $('bmsg').className = 'msg';
+  try {
+    const jf = await post('/settings', fan);
+    const ja = await post('/autotune', at);
+    let jt = { ok: true };
+    if (hasTune) jt = await post('/tuning', tune);
+    if (jf.ok && ja.ok && jt.ok) { $('bmsg').textContent = 'saved ✓'; $('bmsg').className = 'msg ok'; setTimeout(closeBoardControlModal, 800); tick(); }
+    else { $('bmsg').textContent = 'failed: ' + (jf.detail || ja.detail || jt.detail || 'error'); $('bmsg').className = 'msg'; }
+  } catch (e) { $('bmsg').textContent = 'failed: ' + e; $('bmsg').className = 'msg'; }
+}
+
+let mjLogoClicks = 0, mjLogoTimer = null;
+$('mjlogo').addEventListener('click', () => {
+  clearTimeout(mjLogoTimer);
+  mjLogoClicks++;
+  if (mjLogoClicks >= 5) {
+    mjLogoClicks = 0;
+    launchDoom();
+    return;
+  }
+  mjLogoTimer = setTimeout(() => { mjLogoClicks = 0; }, 2000);
+});
+$('gear').addEventListener('click', openSettings);
+$('scancel').addEventListener('click', closeSettings);
+$('ssave').addEventListener('click', saveMinerSettings);
+$('mrestart').addEventListener('click', restartMiner);
+$('bcClose').addEventListener('click', closeBoardControlModal);
+$('bsave').addEventListener('click', saveBoardSettings);
+$('fauto').addEventListener('change', syncRows);
+$('vauto').addEventListener('change', syncAuto);
+$('vmode').addEventListener('change', syncTargetMode);
+$('segaxis').querySelectorAll('.segbtn').forEach(b => {
+  b.addEventListener('click', () => setTargetAxis(b.dataset.axis));
+});
+
+// Setup Chip Filter Button Handlers
+$('chipFilterBtns').querySelectorAll('.cfilterbtn').forEach(b => {
+  b.addEventListener('click', () => {
+    $('chipFilterBtns').querySelectorAll('.cfilterbtn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    CHIP_FILTER = b.dataset.filter;
+    if (LAST) render(LAST);
+  });
+});
+
+$('mname').addEventListener('input', syncWorkerNote);
+$('puser').addEventListener('input', syncWorkerNote);
+$('modal').addEventListener('click', e => { if (e.target === $('modal')) closeSettings(); });
+$('boardControlModal').addEventListener('click', e => { if (e.target === $('boardControlModal')) closeBoardControlModal(); });
+
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUJINA // Info</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cyan: #00f0ff;
+    --lime: #c8ff00;
+    --amber: #ffb000;
+    --green: #1bff9c;
+    --red: #ff3860;
+    --purple: #b967ff;
+    --bg: #05060c;
+    --panel: #0a0f1c;
+    --panel2: #0d1424;
+    --line: #14243a;
+    --dim: #4a6a86;
+    --ink: #d6f7ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Share Tech Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 24px 20px 60px; }
+  .top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 20px;
+    flex-wrap: wrap; gap: 10px;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-weight: 900; margin: 0;
+    font-size: 22px; letter-spacing: .16em; text-transform: uppercase;
+  }
+  h1 .chev { color: var(--cyan); text-shadow: 0 0 8px rgba(0,240,255,.5); }
+  .nav a {
+    color: var(--dim); text-decoration: none; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; margin-left: 18px;
+    border-bottom: 1px solid transparent; padding-bottom: 3px;
+  }
+  .nav a:hover, .nav a.active { color: var(--cyan); border-color: var(--cyan); }
+  .status-strip {
+    display: flex; gap: 8px; align-items: center; font-size: 12px;
+    color: var(--dim); letter-spacing: .05em;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+  .sec { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 12px;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--dim);
+    margin: 28px 0 12px; display: flex; align-items: center; gap: 10px; }
+  .sec:first-of-type { margin-top: 0; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px;
+    background: var(--line); border: 1px solid var(--line); }
+  .stat { background: var(--panel); padding: 12px 14px; }
+  .stat .label { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--dim); margin-bottom: 6px; }
+  .stat .val { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 18px; color: var(--ink); }
+  .stat .val.cyan { color: var(--cyan); text-shadow: 0 0 6px rgba(0,240,255,.35); }
+  .stat .val.amber { color: var(--amber); }
+  .stat .val.lime { color: var(--lime); }
+  .stat .val.green { color: var(--green); }
+  .stat .val.red { color: var(--red); }
+  .stat .val small { font-size: 11px; color: var(--dim); font-weight: 400; margin-left: 4px; }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); background: var(--panel); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+  th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    font-weight: 400; background: var(--panel2); position: sticky; top: 0; }
+  tbody tr:hover { background: var(--panel2); }
+  td.chip-name { font-family: 'Orbitron', sans-serif; font-weight: 700; color: var(--cyan); }
+  .bar { display: inline-flex; height: 6px; width: 110px; border-radius: 2px; overflow: hidden;
+    vertical-align: middle; margin-right: 8px; background: #000; }
+  .bar span { display: block; height: 100%; }
+  .domain-cell { display: flex; align-items: center; justify-content: flex-end; gap: 0; }
+
+  .msg { padding: 40px; text-align: center; color: var(--dim); font-size: 13px; letter-spacing: .05em; }
+  .msg.err { color: var(--red); }
+
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1><span class="chev">//</span>MUJINA <span style="color:var(--dim);font-weight:400">/ INFO</span></h1>
+    <div style="display:flex;align-items:center;gap:18px">
+      <div class="status-strip"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+      <nav class="nav">
+        <a href="/dashboard">Dashboard</a>
+        <a href="/info" class="active">Info</a>
+      </nav>
+    </div>
+  </div>
+
+  <div id="body">
+    <div class="msg">loading…</div>
+  </div>
+</div>
+
+<script>
+function $(id) { return document.getElementById(id); }
+function n(v, d) { return (v === null || v === undefined) ? (d ?? '—') : v; }
+function f1(v) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(1); }
+function f2(v) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(2); }
+
+function domainBar(cnt, total) {
+  const colors = ['#4a6a86', '#00f0ff', '#b967ff', '#ffb000'];
+  let html = '<div class="bar">';
+  cnt.forEach((c, i) => {
+    const pct = total > 0 ? (c / total * 100) : 0;
+    html += `<span style="width:${pct}%;background:${colors[i]}"></span>`;
+  });
+  html += '</div>';
+  return html;
+}
+
+function render(d) {
+  const total = d.asics_total || 12;
+  const failColor = d.spd_dh > 20 ? 'red' : (d.spd_dh > 10 ? 'amber' : 'green');
+  const hashPct = d.ghsmm > 0 ? (d.ghsspd / d.ghsmm * 100) : 0;
+
+  let html = '';
+
+  html += '<div class="sec">Chain Summary</div>';
+  html += '<div class="grid">';
+  html += stat('Hashrate (real)', f1(d.ghsspd), 'GH/s', 'cyan');
+  html += stat('Hashrate (nameplate)', f1(d.ghsmm), 'GH/s', '');
+  html += stat('Real / Nameplate', f1(hashPct), '%', '');
+  html += stat('SmartSpeed Fail Rate', f2(d.spd_dh), '%', failColor);
+  html += stat('Temp Avg / Max', `${f1(d.temp_avg)} / ${f1(d.temp_max)}`, '°C', d.temp_max > 80 ? 'red' : '');
+  html += stat('Chips', n(d.asics_total), 'online', '');
+  html += stat('Chain State', d.paused ? 'PAUSED' : 'MINING', '', d.paused ? 'amber' : 'green');
+  html += stat('IPC', d.ipc_connected ? 'CONNECTED' : 'DOWN', '', d.ipc_connected ? 'green' : 'red');
+  html += '</div>';
+
+  html += '<div class="sec">Commanded PLL / Voltage</div>';
+  html += '<div class="grid">';
+  (d.pll_freq_commanded || []).forEach((f, i) => {
+    html += stat(`Domain ${i}`, n(f), 'MHz', '');
+  });
+  html += stat('Core Voltage', n(d.voltage_mv_commanded), 'mV', 'amber');
+  html += '</div>';
+
+  html += '<div class="sec">Error Counters (chain-wide)</div>';
+  html += '<div class="grid">';
+  html += stat('err_crc', n(d.err_crc), '', d.err_crc > 0 ? 'amber' : '');
+  html += stat('nonce_read_err', n(d.nonce_read_err), '', '');
+  html += stat('nonce_bad_len', n(d.nonce_bad_len), '', '');
+  html += stat('nonce_overflow', n(d.nonce_overflow), '', '');
+  html += stat('regread_err', n(d.regread_err), '', d.regread_err > 0 ? 'red' : '');
+  html += '</div>';
+
+  html += '<div class="sec">Power (INA226, USB-C PD input rail)</div>';
+  html += '<div class="grid">';
+  html += stat('Bus Voltage', f2(d.ina_bus_v), 'V', '');
+  html += stat('Current', f2(d.ina_current_a), 'A', '');
+  html += stat('Power', f1(d.ina_power_w), 'W', 'amber');
+  html += stat('Efficiency', d.ina_power_w > 0 && d.ghsspd > 0 ? f2(d.ina_power_w / (d.ghsspd / 1000)) : '—', 'J/TH', '');
+  html += '</div>';
+
+  html += '<div class="sec">Pool</div>';
+  html += '<div class="grid">';
+  html += stat('Job ID', d.job_id !== null && d.job_id !== undefined ? '0x' + Number(d.job_id).toString(16).padStart(8, '0') : '—', '', '');
+  html += stat('Difficulty', f2(d.difficulty), '', '');
+  html += stat('Shares Found (local)', n(d.shares_found), '', '');
+  html += stat('Shares Accepted', n(d.shares_accepted), '', 'green');
+  html += stat('Shares Rejected', n(d.shares_rejected), '', d.shares_rejected > 0 ? 'red' : '');
+  html += '</div>';
+
+  html += '<div class="sec">Per-Chip Detail</div>';
+  html += '<div class="table-wrap"><table><thead><tr>';
+  html += '<th>Chip</th><th>Temp °C</th><th>Volt (sense)</th><th>PLL Domains (engine count)</th>';
+  html += '<th>D0 MHz</th><th>D1 MHz</th><th>D2 MHz</th><th>D3 MHz</th>';
+  html += '<th>ghsspd</th><th>spd_dh</th>';
+  html += '<th>Timeout</th><th>Heartbeat</th><th>Data</th>';
+  html += '</tr></thead><tbody>';
+  (d.chips || []).forEach(c => {
+    const cntTotal = (c.pll_cnt || []).reduce((a, b) => a + b, 0);
+    const dhColor = c.spd_dh > 20 ? 'var(--red)' : (c.spd_dh > 10 ? 'var(--amber)' : 'var(--green)');
+    html += '<tr>';
+    html += `<td class="chip-name">chip${c.chip}</td>`;
+    html += `<td>${f1(c.temp_c)}</td>`;
+    html += `<td>${f1(c.volt_mv)}</td>`;
+    html += `<td><div class="domain-cell">${domainBar(c.pll_cnt || [], cntTotal)}${(c.pll_cnt||[]).join('/')}</div></td>`;
+    (c.pll_freq || []).forEach(f => { html += `<td>${n(f)}</td>`; });
+    html += `<td>${f1(c.ghsspd)}<small style="color:var(--dim)"> GH/s</small></td>`;
+    html += `<td style="color:${dhColor}">${f2(c.spd_dh)}%</td>`;
+    html += `<td>${n(c.nonce_timeout)}</td>`;
+    html += `<td>${n(c.nonce_heartbeat)}</td>`;
+    html += `<td>${n(c.nonce_data)}</td>`;
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  $('body').innerHTML = html;
+}
+
+function stat(label, val, unit, cls) {
+  return `<div class="stat"><div class="label">${label}</div><div class="val ${cls||''}">${val}${unit ? `<small>${unit}</small>` : ''}</div></div>`;
+}
+
+async function tick() {
+  try {
+    const r = await fetch('/nano3s-detail');
+    if (r.status === 503) {
+      $('connDot').className = 'dot';
+      $('connText').textContent = 'no status yet (IPC not connected)';
+      $('body').innerHTML = '<div class="msg">Waiting for the first IPC_MSG_STATUS from rtos_core.elf…</div>';
+      return;
+    }
+    if (r.status === 501) {
+      $('connDot').className = 'dot bad';
+      $('connText').textContent = 'not supported on this build';
+      $('body').innerHTML = '<div class="msg err">This mujina-minerd build has no nano3s board driver compiled in.</div>';
+      return;
+    }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    $('connDot').className = 'dot ' + (d.ipc_connected ? 'ok' : 'bad');
+    $('connText').textContent = d.ipc_connected ? 'live' : 'ipc disconnected';
+    render(d);
+  } catch (e) {
+    $('connDot').className = 'dot bad';
+    $('connText').textContent = 'fetch failed: ' + e;
+  }
+}
+
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

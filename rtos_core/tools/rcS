@@ -1,0 +1,70 @@
+#!/bin/sh
+
+
+# Start all init scripts in /etc/init.d
+# executing them in numerical order.
+#
+for i in /etc/init.d/S??* ;do
+
+     # Ignore dangling symlinks (if any).
+     [ ! -f "$i" ] && continue
+
+     case "$i" in
+	*.sh)
+	    # Source shell script for speed.
+	    (
+		trap - INT QUIT TSTP
+		set start
+		. $i
+	    )
+	    ;;
+	*)
+	    # No sh extension, so fork subprocess.
+	    $i start
+	    ;;
+    esac
+done
+bootddev=$(cat /proc/cmdline  | sed  -n  "s#root=\(\/dev\/mmcblk[0-9]\).*#\1#p" )
+printf "fix\n" | parted ---pretend-input-tty ${bootddev} print  >/dev/null 2>&1
+
+cat /etc/version/release_version
+
+ubiattach /dev/ubi_ctrl -m 9
+
+mkdir -p /mntapp
+mount -t ubifs /dev/ubi1_0  /mntapp
+
+/mntapp/release/linux/app/wdt_disable_hold &
+
+mkdir -p /data
+ubiattach /dev/ubi_ctrl -m 10
+mount -t ubifs /dev/ubi2_0  /data
+
+# Must run after /data is mounted (WiFi needs /data/userconfig/
+# wpa_supplicant.conf) but before /sharefs is set up below (GPIO34 must
+# be asserted before rtos_core.elf's uart_init() reconfigures that pin's
+# IOMUX, and rtos_core.elf can't start until /sharefs and the IPC bridge
+# exist -- so this window is safely before that's possible).
+/mntapp/release/linux/app/hardware_bringup.sh 2>/dev/null
+
+rm -fr /sharefs
+mkdir -p /mntapp/release/rtt
+ln -s /mntapp/release/rtt /sharefs
+rm -f /sharefs/biglog
+ln -s /data/userdata/log/biglog /sharefs/biglog
+cd /mnt
+insmod k_ipcm.ko
+./sharefs &
+cd -
+
+/etc/user_permission_chg.sh
+
+# check dir size
+if [ $(du -s /data | cut -f 1) -gt 16000 ]; then
+        rm /data/core/* -rf
+        sync
+fi
+
+# mm_miner NOT launched -- our safe-idle config (power_en LOW + RST asserted via rtos_core.elf --safeidle in init.sh).
+# WiFi and fan bring-up now run earlier as part of hardware_bringup.sh above.
+/mntapp/release/linux/app/mujina_display_startup.sh &

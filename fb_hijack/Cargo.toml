@@ -1,0 +1,25 @@
+[package]
+name = "fb_hijack"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fb_hijack"
+path = "src/main.rs"
+
+[[bin]]
+name = "fb_draw"
+path = "src/fb_draw.rs"
+
+[[bin]]
+name = "fb_button"
+path = "src/fb_button.rs"
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+lto = true
+strip = true
+
+[dependencies]
+libc = "0.2"

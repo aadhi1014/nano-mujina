@@ -1,0 +1,170 @@
+# Issue triage template for mujina-miner
+# Adapted from Ghostty (https://github.com/ghostty-org/ghostty)
+labels: ["needs-confirmation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > Please search for both existing [Discussions](https://github.com/256foundation/mujina/discussions?discussions_q=)
+        > and [Issues](https://github.com/256foundation/mujina/issues)
+        > prior to opening a new Discussion to avoid duplicates.
+        >
+        > This template is inspired by [Ghostty's contribution
+        > workflow](https://github.com/ghostty-org/ghostty). Thanks to
+        > Mitchell Hashimoto and contributors for the pattern!
+  - type: markdown
+    attributes:
+      value: "# Issue Details"
+  - type: textarea
+    attributes:
+      label: Issue Description
+      description: |
+        Provide a detailed description of the issue. Include relevant
+        information, such as:
+        - The feature, board, or protocol you encounter the issue with
+        - Screenshots, logs, or other supporting media
+        - If this is a regression of a previously closed issue, include
+          the reference (Discussion, Issue, PR, commit)
+
+        > [!TIP]
+        > **Not sure what information to include?**
+        > Here are some recommendations:
+        > - **Hardware issues:** include board type (Bitaxe Gamma,
+        >   EmberOne), connection method (USB path), and LED behavior if
+        >   relevant
+        > - **Protocol issues:** include serial captures if available,
+        >   register dumps, or logic analyzer data
+        > - **Pool connection issues:** include pool URL (redact
+        >   credentials), Stratum messages, and network connectivity
+        >   details
+        > - **Performance issues:** include hashrate measurements,
+        >   temperature readings, and power consumption if available
+        > - **Crashes or panics:** include the full stack trace and
+        >   RUST_BACKTRACE output
+      placeholder: |
+        When running mujina-minerd with my Bitaxe Gamma board, the
+        miner connects to the pool successfully but the board never
+        starts hashing. The LED stays solid blue instead of showing the
+        expected mining pattern.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected Behavior
+      description: |
+        Describe how you expect mujina-miner to behave in this
+        situation. Include any relevant documentation links or
+        references to working configurations.
+      placeholder: |
+        The board should begin hashing after pool connection, the LED
+        should show a mining pattern (color cycling or breathing), and
+        shares should be submitted to the pool.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Actual Behavior
+      description: |
+        Describe how mujina-miner actually behaves. If it's not
+        immediately obvious how this differs from expected behavior,
+        please be specific about the deviation.
+      placeholder: |
+        The board connects but never starts hashing. The LED stays
+        solid blue. No shares are submitted. The logs show "HashThread
+        started" but no job distribution messages.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction Steps
+      description: |
+        Provide detailed step-by-step instructions for reproducing this
+        issue. Include commands, configuration, and any special setup
+        required.
+      placeholder: |
+        1. Connect Bitaxe Gamma board via USB
+        2. Run: RUST_LOG=info cargo run --bin mujina-minerd
+        3. Observe connection to pool succeeds
+        4. Observe board LED stays solid blue
+        5. Wait 30 seconds - no shares submitted
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Logs
+      description: |
+        Provide relevant log output with `RUST_LOG=debug` or
+        `RUST_LOG=trace` set. For crashes, include `RUST_BACKTRACE=1`
+        output. Redact any pool credentials or wallet addresses.
+      placeholder: |
+        RUST_LOG=debug cargo run --bin mujina-minerd
+
+        [2025-01-15T12:34:56Z INFO  mujina_miner] Starting minerd
+        [2025-01-15T12:34:56Z DEBUG mujina_miner::transport::usb]
+          Found device: Bitaxe Gamma at /dev/ttyACM0
+        [2025-01-15T12:34:57Z INFO  mujina_miner::stratum_v1]
+          Connected to pool: stratum+tcp://pool.example.com:3333
+        [2025-01-15T12:34:57Z DEBUG mujina_miner::hash_thread]
+          HashThread started for board 0
+        [2025-01-15T12:34:57Z DEBUG mujina_miner::scheduler]
+          Waiting for jobs...
+      render: text
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: "# System Information"
+  - type: textarea
+    attributes:
+      label: mujina-miner Version
+      description: |
+        Paste the output of `cargo --version` and your git commit if
+        running from source. If using a release, specify the version
+        number.
+      placeholder: |
+        cargo 1.75.0 (1d8b05cdd 2024-11-05)
+        git commit: 9a39e90
+      render: text
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Linux Distribution and Kernel
+      description: |
+        Specify your Linux distribution and kernel version (e.g.,
+        `uname -a`). mujina-miner only supports Linux.
+      placeholder: Debian Trixie, Linux 6.8.0-51-generic x86_64
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Hardware Info
+      description: |
+        Provide hardware details:
+        - Hashboard you're using
+        - Firmware version
+        - Board modifications or custom hardware
+        - Power supply specifications
+        - Multiple boards if relevant
+      placeholder: |
+        - Stock Bitaxe Gamma, no modifications
+        - Bitaxe firmware: bitaxe-raw v1.2.3
+        - 5V 6A power supply
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Configuration
+      description: |
+        Provide the **minimum** configuration needed to reproduce this
+        issue. Redact any sensitive information (pool credentials,
+        wallet addresses).
+      placeholder: |
+        Environment variables:
+        RUST_LOG=debug
+        MUJINA_POOL_URL=stratum+tcp://pool.example.com:3333
+        MUJINA_POOL_USER=your_wallet.worker_name
+      render: bash
+    validations:
+      required: false

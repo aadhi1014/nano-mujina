@@ -1,0 +1,7 @@
+# Redirect all issue creation to GitHub Discussions for triage
+# Adapted from Ghostty (https://github.com/ghostty-org/ghostty)
+blank_issues_enabled: false
+contact_links:
+  - name: Bug Reports, Feature Requests, Questions
+    url: https://github.com/256foundation/mujina/discussions/new/choose
+    about: Start here for all bugs, features, and questions. Discussions help us understand the issue before creating actionable work items.

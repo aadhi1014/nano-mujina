@@ -1,0 +1,18 @@
+[package]
+name = "nano3s_ui"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "nano3s_ui"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+lto = true
+strip = true
+
+[build-dependencies]
+cc = "1"

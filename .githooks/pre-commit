@@ -1,0 +1,49 @@
+#!/bin/sh
+# Pre-commit hook: fast check for whitespace and formatting.
+#
+# Checks the worktree, not the index. With partially staged files
+# this may flag formatting issues in unstaged code, which is a
+# false positive when only the staged content matters. Skip with
+# git commit --no-verify.
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+FAILED=0
+
+# Exit early if no staged changes (message-only amend)
+if git diff --cached --quiet; then
+    exit 0
+fi
+
+echo "Running .githooks/pre-commit..."
+
+# Check for whitespace errors
+if git diff --cached --check; then
+    printf "${GREEN}[OK]${NC} No git whitespace errors\n"
+else
+    printf "${RED}[ERROR]${NC} Whitespace errors detected by git. Fix them with:\n"
+    echo "  git diff --cached --name-only | xargs sed -i 's/[[:space:]]*$//'"
+    FAILED=1
+fi
+
+# Check Rust formatting (against the worktree)
+if git diff --cached --name-only | grep -q '\.rs$'; then
+    if cargo fmt -- --check 2>/dev/null; then
+        printf "${GREEN}[OK]${NC} cargo fmt --check passes\n"
+    else
+        printf "${RED}[ERROR]${NC} cargo fmt --check failed. Fix with:\n"
+        echo "  cargo fmt"
+        FAILED=1
+    fi
+fi
+
+if [ $FAILED -eq 1 ]; then
+    echo ""
+    printf "${RED}Commit aborted due to errors above.${NC}\n"
+    exit 1
+fi
+
+exit 0
