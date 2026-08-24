@@ -343,40 +343,20 @@ const UUID_CHAR_FFE1: u16 = 0xFFE1; // read: wifi scan results
 const UUID_CHAR_FFE2: u16 = 0xFFE2; // write: commands
 const UUID_CHAR_FFE3: u16 = 0xFFE3; // read: JSON status
 
-// Standard Generic Access service. Real BLE stacks (the ones the real
-// Avalon app's index-based reads were tuned against) auto-expose this
-// ahead of any custom service, with a READ-capable Device Name
-// characteristic. iOS's CoreBluetooth filters 0x1800/0x1801 out of
-// `discoverServices()` results by platform policy; Android's
-// BluetoothGatt does not. That one-service difference is exactly the
-// +1 offset the app's Dart source hardcodes between its iOS and
-// Android read(index:) calls for the wifi-scan-results and status
-// characteristics (see the app's own GPL-3.0 source,
-// Canaan-Creative/avalon_family) -- without exposing this service
-// ourselves, Android's indices land one slot early and silently read
-// the wrong (empty) characteristic instead of erroring.
-const UUID_SERVICE_GAP: u16 = 0x1800;
-const UUID_CHAR_DEVICE_NAME: u16 = 0x2A00;
-
 const CHR_PROP_READ: u8 = 0x02;
 const CHR_PROP_WRITE_NO_RSP: u8 = 0x04;
 const CHR_PROP_WRITE: u8 = 0x08;
 
-// Fixed attribute handles (no dynamic allocation needed -- the
-// database never changes shape at runtime). GAP service first (lowest
-// handles), matching what real BLE stacks auto-generate.
-const H_GAP_SERVICE: u16 = 0x0001;
-const H_GAP_CHAR_DECL: u16 = 0x0002;
-const H_GAP_CHAR_VAL: u16 = 0x0003; // Device Name
-
-const H_SERVICE: u16 = 0x0004;
-const H_CHAR1_DECL: u16 = 0x0005;
-const H_CHAR1_VAL: u16 = 0x0006; // FFE1
-const H_CHAR2_DECL: u16 = 0x0007;
-const H_CHAR2_VAL: u16 = 0x0008; // FFE2
-const H_CHAR3_DECL: u16 = 0x0009;
-const H_CHAR3_VAL: u16 = 0x000A; // FFE3
-const H_MAX: u16 = 0x000A;
+// Fixed attribute handles for our one service (no dynamic allocation
+// needed -- the database never changes shape at runtime).
+const H_SERVICE: u16 = 0x0001;
+const H_CHAR1_DECL: u16 = 0x0002;
+const H_CHAR1_VAL: u16 = 0x0003; // FFE1
+const H_CHAR2_DECL: u16 = 0x0004;
+const H_CHAR2_VAL: u16 = 0x0005; // FFE2
+const H_CHAR3_DECL: u16 = 0x0006;
+const H_CHAR3_VAL: u16 = 0x0007; // FFE3
+const H_MAX: u16 = 0x0007;
 
 struct GattState {
     ffe1_value: Vec<u8>, // scan results
@@ -441,25 +421,21 @@ fn att_error(fd: i32, conn_handle: u16, opcode: u8, handle: u16, ecode: u8) {
 /// `handle` doesn't exist.
 fn attr_lookup(handle: u16, state: &GattState) -> Option<(u16, Vec<u8>)> {
     match handle {
-        H_GAP_SERVICE => Some((UUID_PRIMARY_SERVICE, UUID_SERVICE_GAP.to_le_bytes().to_vec())),
-        H_GAP_CHAR_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ, H_GAP_CHAR_VAL, UUID_CHAR_DEVICE_NAME))),
-        H_GAP_CHAR_VAL => Some((UUID_CHAR_DEVICE_NAME, state.device_name.clone().into_bytes())),
         H_SERVICE => Some((UUID_PRIMARY_SERVICE, UUID_SERVICE_FFFF.to_le_bytes().to_vec())),
         H_CHAR1_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ, H_CHAR1_VAL, UUID_CHAR_FFE1))),
         H_CHAR1_VAL => Some((UUID_CHAR_FFE1, state.ffe1_value.clone())),
-        // Deliberately WRITE-only (no READ): with the GAP service above
-        // now providing the one-extra-characteristic offset Android's
-        // real BLE stack expects, the read-capable list is [FFE1, FFE3]
-        // on both platforms after platform-side filtering, matching the
-        // app's hardcoded read(index:) values exactly (iOS: 0/1,
-        // Android: 1/2 -- one ahead of iOS since Android's stack doesn't
-        // filter the GAP service out of discovery like iOS's does).
-        // Previously this had READ added too, which happened to line up
-        // Android's *status* read but broke its *wifi-scan-results* read
-        // (both landed on FFE2's empty value one slot early) -- this and
-        // the GAP service together fix both reads on both platforms.
-        H_CHAR2_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_WRITE | CHR_PROP_WRITE_NO_RSP, H_CHAR2_VAL, UUID_CHAR_FFE2))),
-        H_CHAR2_VAL => Some((UUID_CHAR_FFE2, Vec::new())),
+        // Also advertises READ (not just WRITE/WRITE_NO_RSP): the real
+        // Avalon Life app's BleService builds a *separate* index list
+        // per property (readCharacteristicUUIDs, writeWithResponse...,
+        // etc), each populated in characteristic-discovery order. Its
+        // status-read call uses a hardcoded index into the read-only
+        // list assuming 3 read-capable characteristics exist (FFE1,
+        // FFE2, FFE3) -- if FFE2 lacks READ, that list only has 2
+        // entries and the index falls out of bounds, silently
+        // returning null every single time. Confirmed via the app's
+        // own GPL-3.0 source (Canaan-Creative/avalon_family).
+        H_CHAR2_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ | CHR_PROP_WRITE | CHR_PROP_WRITE_NO_RSP, H_CHAR2_VAL, UUID_CHAR_FFE2))),
+        H_CHAR2_VAL => Some((UUID_CHAR_FFE2, Vec::new())), // no real content; READ only needs to be a valid no-op
         H_CHAR3_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ, H_CHAR3_VAL, UUID_CHAR_FFE3))),
         H_CHAR3_VAL => Some((UUID_CHAR_FFE3, state.ffe3_value.clone())),
         _ => None,
@@ -493,32 +469,15 @@ fn handle_read_by_group_type(fd: i32, conn_handle: u16, req: &[u8]) {
     let start = u16::from_le_bytes([req[1], req[2]]);
     let end = u16::from_le_bytes([req[3], req[4]]);
     let group_type = u16::from_le_bytes([req[5], req[6]]);
-    if group_type != UUID_PRIMARY_SERVICE {
+    if group_type != UUID_PRIMARY_SERVICE || start > H_SERVICE || end < H_SERVICE {
         att_error(fd, conn_handle, ATT_OP_READ_BY_GROUP_TYPE_REQ, start, ATT_ECODE_ATTRIBUTE_NOT_FOUND);
         return;
     }
-    // Two services/groups now: GAP first (lowest handles), then our
-    // custom FFFF service. Real clients discover iteratively, re-querying
-    // from the last group's end handle + 1, so only a group whose *start*
-    // handle falls in [start, end] belongs in this response -- both UUIDs
-    // are 16-bit, so entry length (2+2+2=6) matches and they can share one
-    // response when a single wide query (the common case) covers both.
-    let groups: [(u16, u16, u16); 2] =
-        [(H_GAP_SERVICE, H_GAP_CHAR_VAL, UUID_SERVICE_GAP), (H_SERVICE, H_MAX, UUID_SERVICE_FFFF)];
+    // One service, one group: handle H_SERVICE..H_MAX, UUID 0xFFFF.
     let mut payload = vec![ATT_OP_READ_BY_GROUP_TYPE_RSP, 6]; // length per entry = 2+2+2
-    let mut any = false;
-    for &(group_start, group_end, uuid) in &groups {
-        if group_start >= start && group_start <= end {
-            payload.extend_from_slice(&group_start.to_le_bytes());
-            payload.extend_from_slice(&group_end.to_le_bytes());
-            payload.extend_from_slice(&uuid.to_le_bytes());
-            any = true;
-        }
-    }
-    if !any {
-        att_error(fd, conn_handle, ATT_OP_READ_BY_GROUP_TYPE_REQ, start, ATT_ECODE_ATTRIBUTE_NOT_FOUND);
-        return;
-    }
+    payload.extend_from_slice(&H_SERVICE.to_le_bytes());
+    payload.extend_from_slice(&H_MAX.to_le_bytes());
+    payload.extend_from_slice(&UUID_SERVICE_FFFF.to_le_bytes());
     send_l2cap(fd, conn_handle, ATT_CID, &payload);
 }
 
@@ -534,7 +493,7 @@ fn handle_read_by_type(fd: i32, conn_handle: u16, req: &[u8], state: &Arc<Mutex<
     let attr_type = u16::from_le_bytes([req[5], req[6]]);
 
     if attr_type == UUID_CHARACTERISTIC {
-        let decls = [H_GAP_CHAR_DECL, H_CHAR1_DECL, H_CHAR2_DECL, H_CHAR3_DECL];
+        let decls = [H_CHAR1_DECL, H_CHAR2_DECL, H_CHAR3_DECL];
         let mut entries: Vec<(u16, Vec<u8>)> = Vec::new();
         for &h in &decls {
             if h >= start && h <= end {
