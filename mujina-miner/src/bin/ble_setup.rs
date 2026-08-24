@@ -23,6 +23,33 @@ const BTPROTO_HCI: i32 = 1;
 const HCI_CHANNEL_USER: u16 = 1;
 const HCI_DEV_ID: u16 = 0; // hci0
 
+// ---------------------------------------------------------------------------
+// LCD status page (nano3s_ui's "wifi-setup" page, driver.c). The real
+// Avalon Life app's own success/failure indicator was found unreliable
+// (see the module doc comment history) -- the device's own screen is the
+// source of truth for setup progress instead.
+// ---------------------------------------------------------------------------
+
+const PAGE_FILE: &str = "/mntapp/release/linux/app/fb_page";
+const BLE_WIFI_STATUS_FILE: &str = "/tmp/ble_wifi_status.txt";
+
+fn set_display_page(page: &str) {
+    if let Err(e) = std::fs::write(PAGE_FILE, page) {
+        eprintln!("step: failed to write {PAGE_FILE}: {e}");
+    }
+}
+
+/// Writes BLE_WIFI_STATUS_FILE for nano3s_ui's "wifi-setup" page to
+/// read. `state` is one of advertising/client_connected/
+/// credentials_received/connecting/connected/failed (see driver.c's
+/// refresh_wifi_setup() for exactly how each maps to on-screen text).
+fn write_wifi_status(state: &str, detail: &str) {
+    let body = format!("state={state}\ndetail={detail}\n");
+    if let Err(e) = std::fs::write(BLE_WIFI_STATUS_FILE, body) {
+        eprintln!("step: failed to write {BLE_WIFI_STATUS_FILE}: {e}");
+    }
+}
+
 #[repr(C)]
 struct SockaddrHci {
     hci_family: u16,
@@ -246,10 +273,15 @@ fn main() {
     // advertising ~90s after WiFi connects; this achieves the same
     // effect more simply by never starting it in the first place once
     // already connected, rechecked every 60s via the sleep+exit below.
+    let force_advertise = std::env::var("BLE_SETUP_FORCE_ADVERTISE").as_deref() == Ok("1");
     if let Some(ip) = ifconfig_wlan0_ip() {
-        eprintln!("step: wlan0 already connected (ip={ip}), not advertising; idling before recheck");
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        return;
+        if force_advertise {
+            eprintln!("step: wlan0 connected (ip={ip}) but BLE_SETUP_FORCE_ADVERTISE=1, advertising anyway");
+        } else {
+            eprintln!("step: wlan0 already connected (ip={ip}), not advertising; idling before recheck");
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            return;
+        }
     }
 
     let fd = open_hci_user_channel(HCI_DEV_ID).unwrap_or_else(|e| {
@@ -294,6 +326,8 @@ fn main() {
         std::process::exit(1);
     });
     println!("RESULT: advertising enabled as '{name}' -- check for it on a scanner now.");
+    write_wifi_status("advertising", &name);
+    set_display_page("wifi-setup");
 
     event_loop(fd, &name);
 }
@@ -390,8 +424,18 @@ fn attr_lookup(handle: u16, state: &GattState) -> Option<(u16, Vec<u8>)> {
         H_SERVICE => Some((UUID_PRIMARY_SERVICE, UUID_SERVICE_FFFF.to_le_bytes().to_vec())),
         H_CHAR1_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ, H_CHAR1_VAL, UUID_CHAR_FFE1))),
         H_CHAR1_VAL => Some((UUID_CHAR_FFE1, state.ffe1_value.clone())),
-        H_CHAR2_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_WRITE | CHR_PROP_WRITE_NO_RSP, H_CHAR2_VAL, UUID_CHAR_FFE2))),
-        H_CHAR2_VAL => Some((UUID_CHAR_FFE2, Vec::new())), // write-only, nothing to read
+        // Also advertises READ (not just WRITE/WRITE_NO_RSP): the real
+        // Avalon Life app's BleService builds a *separate* index list
+        // per property (readCharacteristicUUIDs, writeWithResponse...,
+        // etc), each populated in characteristic-discovery order. Its
+        // status-read call uses a hardcoded index into the read-only
+        // list assuming 3 read-capable characteristics exist (FFE1,
+        // FFE2, FFE3) -- if FFE2 lacks READ, that list only has 2
+        // entries and the index falls out of bounds, silently
+        // returning null every single time. Confirmed via the app's
+        // own GPL-3.0 source (Canaan-Creative/avalon_family).
+        H_CHAR2_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ | CHR_PROP_WRITE | CHR_PROP_WRITE_NO_RSP, H_CHAR2_VAL, UUID_CHAR_FFE2))),
+        H_CHAR2_VAL => Some((UUID_CHAR_FFE2, Vec::new())), // no real content; READ only needs to be a valid no-op
         H_CHAR3_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ, H_CHAR3_VAL, UUID_CHAR_FFE3))),
         H_CHAR3_VAL => Some((UUID_CHAR_FFE3, state.ffe3_value.clone())),
         _ => None,
@@ -501,12 +545,7 @@ fn handle_read_generic(fd: i32, conn_handle: u16, opcode: u8, handle: u16, offse
     let guard = state.lock().unwrap_or_else(|e| e.into_inner());
     let state: &GattState = &guard;
     match attr_lookup(handle, state) {
-        Some((uuid, val)) if handle != H_CHAR2_VAL || uuid == UUID_CHAR_FFE2 => {
-            if handle == H_CHAR2_VAL {
-                // FFE2 is write-only.
-                att_error(fd, conn_handle, opcode, handle, ATT_ECODE_READ_NOT_PERMITTED);
-                return;
-            }
+        Some((_uuid, val)) => {
             if offset > val.len() {
                 att_error(fd, conn_handle, opcode, handle, ATT_ECODE_INVALID_OFFSET);
                 return;
@@ -674,6 +713,7 @@ fn run_wifi_scan(state: &Arc<Mutex<GattState>>) {
 }
 
 fn apply_wifi_credentials(ssid: &str, password: &str, auth: i32, state: &Arc<Mutex<GattState>>) {
+    write_wifi_status("credentials_received", ssid);
     let conf = if auth == 1 {
         format!(
             "ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\n\nnetwork={{\n\tssid=\"{ssid}\"\n\tkey_mgmt=NONE\n}}\n"
@@ -688,6 +728,7 @@ fn apply_wifi_credentials(ssid: &str, password: &str, auth: i32, state: &Arc<Mut
             eprintln!("step: wrote /data/userconfig/wpa_supplicant.conf, restarting wpa_supplicant");
             let _ = std::process::Command::new("wpa_cli").args(["-i", "wlan0", "reconfigure"]).status();
             set_status(state, ssid, auth, 1, None);
+            write_wifi_status("connecting", ssid);
             poll_connection_result(state, ssid, auth);
         }
         Err(e) => eprintln!("step: failed to write wpa_supplicant.conf: {e}"),
@@ -709,9 +750,17 @@ fn set_status(state: &Arc<Mutex<GattState>>, ssid: &str, auth: i32, conn_state: 
 /// polling clients like nano3ble's `set-wifi` would time out waiting
 /// for a status that would never arrive.
 fn poll_connection_result(state: &Arc<Mutex<GattState>>, ssid: &str, auth: i32) {
+    // Real-world test against the Avalon Life app showed it polls FFE3
+    // only a handful of times before giving up and reporting "failed"
+    // to the user -- even though the underlying WiFi connection had, in
+    // fact, already succeeded by then. The app's patience window is
+    // short enough that this loop's own poll latency matters: checking
+    // every 300ms (was 2s) instead of every 2s buys back real margin
+    // against however short that window actually is, without changing
+    // anything about how fast wpa_supplicant itself can reassociate.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_millis(300));
         let wpa_state = std::process::Command::new("wpa_cli")
             .args(["-i", "wlan0", "status"])
             .output()
@@ -724,12 +773,15 @@ fn poll_connection_result(state: &Arc<Mutex<GattState>>, ssid: &str, auth: i32) 
             if let Some(ip) = ip {
                 eprintln!("step: wifi connected, ip={ip}");
                 set_status(state, ssid, auth, 2, Some(&ip));
+                write_wifi_status("connected", &ip);
+                set_display_page("nano3s");
                 return;
             }
         }
     }
     eprintln!("step: wifi connection did not complete within 30s, reporting failed");
     set_status(state, ssid, auth, 3, None);
+    write_wifi_status("failed", "");
 }
 
 /// Parses `ifconfig wlan0`'s `inet addr:X.X.X.X` line. No `ip` binary on
@@ -794,6 +846,7 @@ fn event_loop(fd: i32, device_name: &str) {
                                 conn_handle = Some(handle);
                                 mtu = 23;
                                 state.lock().unwrap_or_else(|e| e.into_inner()).cmd_buf.clear();
+                                write_wifi_status("client_connected", "");
                             } else {
                                 eprintln!("step: LE connection failed, status=0x{status:02x}");
                             }

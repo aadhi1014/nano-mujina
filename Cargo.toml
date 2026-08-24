@@ -1,5 +1,8 @@
 [workspace]
 members = ["mujina-miner"]
+# nano3s_ui and fb_hijack are separate crates with their own Cargo.lock,
+# not meant to share this workspace's unified dependency resolution.
+exclude = ["nano3s_ui", "fb_hijack"]
 resolver = "2"
 
 [workspace.package]

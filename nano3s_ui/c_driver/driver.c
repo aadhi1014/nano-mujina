@@ -19,6 +19,11 @@
 #define PIZZA_FILE "/mntapp/release/linux/app/pizza.rgb565"
 /* Written by rtos_core/tools/mujina.c -- plain key=value lines. */
 #define NANO3S_LIVE_FILE "/tmp/nano3s_live.txt"
+/* Written by ble_setup.rs (2026-08-24) -- same key=value format. Since
+ * the real Avalon Life app's own success/failure indicator turned out
+ * unreliable (see ble_setup.rs's doc comments), this page is the
+ * source of truth for WiFi-setup progress instead. */
+#define BLE_WIFI_STATUS_FILE "/tmp/ble_wifi_status.txt"
 
 #define REFRESH_INTERVAL_MS 2000
 #define POLL_INTERVAL_MS 100
@@ -123,12 +128,14 @@ static char kv_buf[KV_BUF_SIZE];
 static kv_entry_t kv_entries[KV_MAX_ENTRIES];
 static int kv_count;
 
-/* Reads NANO3S_LIVE_FILE and parses "key=value" lines into kv_entries.
- * Returns 0 if the file couldn't be read (mirrors read_nano3s_status()
- * returning None -- the caller falls back to the waiting/"STARTING" page). */
-static int read_nano3s_status(void) {
+/* Reads `path` and parses "key=value" lines into kv_entries. Returns 0
+ * if the file couldn't be read (callers fall back to a waiting/default
+ * state). Shared by both NANO3S_LIVE_FILE and BLE_WIFI_STATUS_FILE --
+ * only one is ever needed per refresh call, so reusing one static
+ * buffer is fine. */
+static int read_kv_file(const char *path) {
     kv_count = 0;
-    FILE *f = fopen(NANO3S_LIVE_FILE, "r");
+    FILE *f = fopen(path, "r");
     if (!f) {
         return 0;
     }
@@ -309,6 +316,10 @@ static lv_meter_indicator_t *diag_chips_arc;
 
 static lv_obj_t *scr_ip, *ip_caption, *ip_value, *ip_no_wifi;
 
+static lv_obj_t *scr_wifi_setup, *wifi_setup_status, *wifi_setup_detail, *wifi_setup_meter;
+static lv_meter_scale_t *wifi_setup_scale;
+static lv_meter_indicator_t *wifi_setup_arc;
+
 static void build_screens(void) {
     const lv_font_t *f14 = &lv_font_montserrat_14;
     const lv_font_t *f24 = &lv_font_montserrat_24;
@@ -434,6 +445,45 @@ static void build_screens(void) {
     ip_caption = make_label(scr_ip, f14, C_IP_BLUE, 90, "IP ADDRESS");
     ip_value = make_label(scr_ip, f24, C_WHITE, 112, NULL);
     ip_no_wifi = make_label(scr_ip, f24, C_RED, 104, "NO WIFI");
+
+    /* wifi-setup -- BLE provisioning progress. Source of truth for
+     * setup outcome, since the vendor phone app's own success/failure
+     * indicator was found unreliable (see ble_setup.rs). A single
+     * progress ring (same visual language as the main hashrate gauge)
+     * instead of plain stacked text -- fill fraction + color together
+     * read as "how far along" at a glance, refresh_wifi_setup() picks
+     * both per state. */
+    scr_wifi_setup = lv_obj_create(NULL);
+    style_bg(scr_wifi_setup, C_BG);
+
+    wifi_setup_meter = lv_meter_create(scr_wifi_setup);
+    lv_obj_remove_style_all(wifi_setup_meter);
+    lv_obj_set_size(wifi_setup_meter, 150, 150);
+    lv_obj_align(wifi_setup_meter, LV_ALIGN_TOP_MID, 0, 14);
+
+    wifi_setup_scale = lv_meter_add_scale(wifi_setup_meter);
+    lv_meter_set_scale_range(wifi_setup_meter, wifi_setup_scale, 0, 100, 360, 0);
+    wifi_setup_arc = lv_meter_add_arc(wifi_setup_meter, wifi_setup_scale, RING_WIDTH, C_YELLOW, 0);
+    lv_meter_set_indicator_start_value(wifi_setup_meter, wifi_setup_arc, 0);
+    lv_meter_set_indicator_end_value(wifi_setup_meter, wifi_setup_arc, 0);
+
+    /* Short state word inside the ring (e.g. "BLE", "LINKED", "OK") --
+     * the full sentence lives below, this is just the at-a-glance core. */
+    wifi_setup_status = lv_label_create(scr_wifi_setup);
+    lv_obj_set_style_text_font(wifi_setup_status, f24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(wifi_setup_status, C_TEXT_1, LV_PART_MAIN);
+    lv_obj_align(wifi_setup_status, LV_ALIGN_TOP_MID, 0, 78);
+
+    /* Full status sentence + detail (device name / SSID / IP), below
+     * the ring. make_label() aligns based on the label's width AT THAT
+     * MOMENT (near-zero for an empty/NULL-text label); widening it
+     * afterward does not retroactively recompute that position, so
+     * re-align explicitly after setting width/wrap. */
+    wifi_setup_detail = make_label(scr_wifi_setup, f14, C_TEXT_2, 176, NULL);
+    lv_label_set_long_mode(wifi_setup_detail, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(wifi_setup_detail, 210);
+    lv_obj_set_style_text_align(wifi_setup_detail, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(wifi_setup_detail, LV_ALIGN_TOP_MID, 0, 176);
 }
 
 /* ── Per-page refresh ─────────────────────────────────────────────────── */
@@ -606,6 +656,85 @@ static void refresh_ip(void) {
     lv_scr_load(scr_ip);
 }
 
+/* BLE WiFi-setup progress -- reads BLE_WIFI_STATUS_FILE (written by
+ * ble_setup.rs), maps its `state` field to a short status line + color
+ * and an optional `detail` line (device name while waiting, SSID while
+ * connecting, IP on success). Falls back to a generic "waiting" message
+ * if the file doesn't exist yet (e.g. right at boot before ble_setup
+ * has written anything). */
+static void refresh_wifi_setup(void) {
+    /* ring_word: short, fits inside the ring at f24. sentence: full
+     * status line shown below the ring. detail_buf: SSID/IP/device-name
+     * context line under that. */
+    const char *ring_word = "...";
+    const char *sentence = "Starting...";
+    lv_color_t color = C_TEXT_3;
+    int32_t fill = 0;
+    char detail_buf[80] = "";
+
+    if (read_kv_file(BLE_WIFI_STATUS_FILE)) {
+        const char *state = kv_str("state");
+        const char *detail = kv_str("detail");
+        if (!state) state = "";
+        if (!detail) detail = "";
+
+        if (strcmp(state, "advertising") == 0) {
+            ring_word = "BLE";
+            sentence = "Waiting for phone";
+            color = C_YELLOW;
+            fill = 20;
+            if (detail[0]) snprintf(detail_buf, sizeof(detail_buf), "Open Avalon Life,\nlook for %s", detail);
+        } else if (strcmp(state, "client_connected") == 0) {
+            ring_word = "LINK";
+            sentence = "Phone connected";
+            color = C_YELLOW;
+            fill = 40;
+        } else if (strcmp(state, "credentials_received") == 0) {
+            ring_word = "SAVE";
+            sentence = "Wifi info received";
+            color = C_YELLOW;
+            fill = 60;
+            if (detail[0]) snprintf(detail_buf, sizeof(detail_buf), "%s", detail);
+        } else if (strcmp(state, "connecting") == 0) {
+            ring_word = "...";
+            sentence = "Connecting";
+            color = C_YELLOW;
+            fill = 80;
+            if (detail[0]) snprintf(detail_buf, sizeof(detail_buf), "%s", detail);
+        } else if (strcmp(state, "connected") == 0) {
+            ring_word = "OK";
+            sentence = "Wifi connected!";
+            color = C_GREEN;
+            fill = 100;
+            if (detail[0]) snprintf(detail_buf, sizeof(detail_buf), "IP %s", detail);
+        } else if (strcmp(state, "failed") == 0) {
+            ring_word = "X";
+            sentence = "Setup failed";
+            color = C_RED;
+            fill = 100;
+            snprintf(detail_buf, sizeof(detail_buf), "Check password,\ntry again");
+        }
+    }
+
+    lv_label_set_text(wifi_setup_status, ring_word);
+    lv_obj_set_style_text_color(wifi_setup_status, color, LV_PART_MAIN);
+    lv_obj_align(wifi_setup_status, LV_ALIGN_TOP_MID, 0, 78);
+
+    wifi_setup_arc->type_data.arc.color = color;
+    lv_meter_set_indicator_end_value(wifi_setup_meter, wifi_setup_arc, fill);
+    lv_obj_invalidate(wifi_setup_meter);
+
+    char full_detail[120];
+    if (detail_buf[0]) {
+        snprintf(full_detail, sizeof(full_detail), "%s\n%s", sentence, detail_buf);
+    } else {
+        snprintf(full_detail, sizeof(full_detail), "%s", sentence);
+    }
+    lv_label_set_text(wifi_setup_detail, full_detail);
+
+    lv_scr_load(scr_wifi_setup);
+}
+
 /* Raw full-screen static image -- bypasses LVGL entirely, same as
  * fb_draw.rs's Screen::load_image()+flush() for this page. Drawn once on
  * page-change only (the source image never changes, unlike the original's
@@ -639,12 +768,13 @@ static void refresh_pizza(void) {
 
 /* ── Page-file polling loop (mirrors fb_draw.rs's run_live_nano3s()) ────── */
 
-typedef enum { PG_LIVE, PG_DIAG, PG_IP, PG_PIZZA, PG_DOOM } page_t;
+typedef enum { PG_LIVE, PG_DIAG, PG_IP, PG_PIZZA, PG_DOOM, PG_WIFI_SETUP } page_t;
 
 static page_t parse_page(const char *s) {
     if (strcmp(s, "nano3s-diag") == 0) return PG_DIAG;
     if (strcmp(s, "ip") == 0) return PG_IP;
     if (strcmp(s, "pizza") == 0) return PG_PIZZA;
+    if (strcmp(s, "wifi-setup") == 0) return PG_WIFI_SETUP;
     /* "doom" fully yields /dev/fb0 -- nano3s_doom owns the panel while
      * this page is selected, same idea as the pizza page's raw-image
      * bypass, just taken further: no refresh, no lv_timer_handler at all,
@@ -702,7 +832,9 @@ static void run_event_loop(void) {
                 if (page_changed) {
                     refresh_pizza();
                 }
-            } else if (read_nano3s_status()) {
+            } else if (pg == PG_WIFI_SETUP) {
+                refresh_wifi_setup();
+            } else if (read_kv_file(NANO3S_LIVE_FILE)) {
                 if (pg == PG_DIAG) {
                     refresh_diag();
                 } else {
