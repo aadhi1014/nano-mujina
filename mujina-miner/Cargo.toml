@@ -9,6 +9,7 @@ repository.workspace = true
 default-run = "mujina-minerd"
 
 [dependencies]
+libc = "0.2"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
