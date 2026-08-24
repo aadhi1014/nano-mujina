@@ -40,10 +40,9 @@ environment needed), or build from source and deploy over SSH
 
 ### Quick Install: Flash a Pre-built Image
 
-Download **[nano-mujina-alpha-v2.kdimg](https://github.com/aadhi1014/nano-mujina/releases/download/alpha-v2/nano-mujina-alpha-v2.kdimg)**
-(123MB, see the [release notes](https://github.com/aadhi1014/nano-mujina/releases/tag/alpha-v2)
-for what's in it -- fixes a WiFi-network-list bug on Android found in
-alpha-v1) and burn it with the same official K230 Burning Tool
+Download **[nano-mujina-alpha-v1.kdimg](https://github.com/aadhi1014/nano-mujina/releases/download/alpha-v1/nano-mujina-alpha-v1.kdimg)**
+(123MB, see the [release notes](https://github.com/aadhi1014/nano-mujina/releases/tag/alpha-v1)
+for what's in it) and burn it with the same official K230 Burning Tool
 Canaan's own [flashing instructions](https://github.com/Canaan-Creative/Avalon_Nano3s#3-imges-burning)
 use. Unlike the stock image, no WiFi credentials or other
 device-specific data are baked in -- the device boots straight into
@@ -53,7 +52,7 @@ first-time BLE setup.
    and unzip it.
 
 2) **Open and select the image**: run `K230BurningTool.exe`, click
-   Open, select `nano-mujina-alpha-v2.kdimg`, set Image part name to
+   Open, select `nano-mujina-alpha-v1.kdimg`, set Image part name to
    "all", and set Medium to "SPI NAND".
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_open.png)
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_select.png)
