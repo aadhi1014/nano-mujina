@@ -425,17 +425,34 @@ fn attr_lookup(handle: u16, state: &GattState) -> Option<(u16, Vec<u8>)> {
         H_CHAR1_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ, H_CHAR1_VAL, UUID_CHAR_FFE1))),
         H_CHAR1_VAL => Some((UUID_CHAR_FFE1, state.ffe1_value.clone())),
         // Also advertises READ (not just WRITE/WRITE_NO_RSP): the real
-        // Avalon Life app's BleService builds a *separate* index list
+        // Avalon Family app's BleService builds a *separate* index list
         // per property (readCharacteristicUUIDs, writeWithResponse...,
-        // etc), each populated in characteristic-discovery order. Its
-        // status-read call uses a hardcoded index into the read-only
-        // list assuming 3 read-capable characteristics exist (FFE1,
-        // FFE2, FFE3) -- if FFE2 lacks READ, that list only has 2
-        // entries and the index falls out of bounds, silently
-        // returning null every single time. Confirmed via the app's
-        // own GPL-3.0 source (Canaan-Creative/avalon_family).
+        // etc), each populated in characteristic-discovery order, and
+        // reads by a hardcoded index that differs between platforms --
+        // confirmed from the app's own GPL-3.0 source
+        // (Canaan-Creative/avalon_family): iOS reads wifi-scan-results
+        // at index 0 (FFE1, already correct) and status at index 1;
+        // Android reads wifi-scan-results at index 1 and status at
+        // index 2. With exactly 3 read-capable characteristics (FFE1,
+        // FFE2, FFE3) in this fixed order, index 1 is FFE2 -- which
+        // Android's WiFi-scan read and iOS's status read both land on,
+        // wanting *different* content. Restructuring the GATT layout
+        // (e.g. adding a 4th read-capable entry ahead of FFE1) shifts
+        // every index and was tried -- it fixed Android's index-1 read
+        // but broke iOS's index-0 read, which depends on there being
+        // nothing ahead of FFE1. So instead of changing structure,
+        // FFE2's read content mirrors FFE1's (the actual wifi scan
+        // results) below: this fixes Android's WiFi list (its real,
+        // actively-blocking bug -- you can't proceed with setup at all
+        // if the network list never populates) without touching the
+        // three characteristics' handles/properties/order at all, so
+        // iOS's WiFi-list read (index 0, still FFE1) is untouched.
+        // iOS's status read (index 1) still won't get real status JSON
+        // this way, but that was already broken/unreliable before this
+        // change (see the module doc comment -- the on-device LCD is
+        // the real status source of truth, not the app's own UI).
         H_CHAR2_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ | CHR_PROP_WRITE | CHR_PROP_WRITE_NO_RSP, H_CHAR2_VAL, UUID_CHAR_FFE2))),
-        H_CHAR2_VAL => Some((UUID_CHAR_FFE2, Vec::new())), // no real content; READ only needs to be a valid no-op
+        H_CHAR2_VAL => Some((UUID_CHAR_FFE2, state.ffe1_value.clone())),
         H_CHAR3_DECL => Some((UUID_CHARACTERISTIC, char_decl_value(CHR_PROP_READ, H_CHAR3_VAL, UUID_CHAR_FFE3))),
         H_CHAR3_VAL => Some((UUID_CHAR_FFE3, state.ffe3_value.clone())),
         _ => None,
