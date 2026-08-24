@@ -33,10 +33,62 @@ characteristics.
 
 ## Installing on Nano3s Hardware
 
-This installs custom firmware on both cores of a real device. It's
-built and deployed from a Linux environment (WSL on Windows works) over
-SSH, and the target device reboots at the end. You'll need physical/
-network access to a Nano3s and its IP address on your LAN.
+This installs custom firmware on both cores of a real device. Two
+ways to get there: flash a pre-built image (fastest, no build
+environment needed), or build from source and deploy over SSH
+(below, for development).
+
+### Quick Install: Flash a Pre-built Image
+
+Download **[nano-mujina-alpha-v1.kdimg](https://github.com/aadhi1014/nano-mujina/releases/download/alpha-v1/nano-mujina-alpha-v1.kdimg)**
+(123MB, see the [release notes](https://github.com/aadhi1014/nano-mujina/releases/tag/alpha-v1)
+for what's in it) and burn it with the same official K230 Burning Tool
+Canaan's own [flashing instructions](https://github.com/Canaan-Creative/Avalon_Nano3s#3-imges-burning)
+use. Unlike the stock image, no WiFi credentials or other
+device-specific data are baked in -- the device boots straight into
+first-time BLE setup.
+
+1) **Download the burning tool**: [K230BurningTool-Windows-v2.1.0](https://kendryte-download.canaan-creative.com/k230/downloads/burn_tool/v2.1.0/K230BurningTool-Windows-v2.1.0-0-gd24909e.zip)
+   and unzip it.
+
+2) **Open and select the image**: run `K230BurningTool.exe`, click
+   Open, select `nano-mujina-alpha-v1.kdimg`, set Image part name to
+   "all", and set Medium to "SPI NAND".
+   ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_open.png)
+   ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_select.png)
+
+3) **Put the device in burn mode**: use a double type-A USB cable to
+   connect the Nano3s to your PC, hold the recessed button, then power
+   the device on while still holding it.
+   ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/nano3s_pin_press.png)
+   The tool's debug box on the right confirms burn mode once it's
+   detected.
+   ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_debug_box_burn_mode.png)
+
+4) **Click Start** and wait -- a few minutes, until "Downloading
+   Completed" appears.
+   ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_start.png)
+   ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_upgrade_completed.png)
+
+5) **First boot**: the device comes up advertising over Bluetooth
+   (look for a name starting `nan3s_` in the official
+   [Avalon Family app](https://play.google.com/store/apps/details?id=com.canaan.avalon)
+   -- also on the [App Store](https://apps.apple.com/us/app/avalon-family/id6479229114)),
+   with the LCD showing a setup progress ring. Connect, enter your
+   WiFi network's SSID and password in the app, and the device joins
+   your network and starts mining -- the LCD tracks each step (waiting
+   for phone, credentials received, connecting, connected). No serial
+   console or SSH access needed.
+
+Burning-tool screenshots and the recovery-pin photo above are from
+Canaan's own [Avalon_Nano3s](https://github.com/Canaan-Creative/Avalon_Nano3s)
+repository, since it's literally the same official tool.
+
+### Build From Source
+
+The rest of this section covers building both firmwares yourself and
+deploying over SSH -- useful for development, or if you want to modify
+the firmware before flashing.
 
 ### 1. Get the cross-toolchains
 
