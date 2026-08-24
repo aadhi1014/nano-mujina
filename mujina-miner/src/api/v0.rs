@@ -16,8 +16,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::commands::SchedulerCommand;
 use super::server::SharedState;
 use crate::api_client::types::{
-    BoardFanRequest, BoardPauseRequest, BoardPowerTargetRequest, BoardTelemetry,
-    BoardTuningRequest, MinerPatchRequest, MinerTelemetry, SourceTelemetry,
+    BoardFanRequest, BoardLedRequest, BoardLedState, BoardPauseRequest, BoardPowerTargetRequest,
+    BoardTelemetry, BoardTuningRequest, MinerPatchRequest, MinerTelemetry, SourceTelemetry,
 };
 
 /// Build the v0 API routes with OpenAPI metadata.
@@ -31,6 +31,7 @@ pub fn routes() -> OpenApiRouter<SharedState> {
         .routes(routes!(patch_board_power_target))
         .routes(routes!(patch_board_fan))
         .routes(routes!(patch_board_pause))
+        .routes(routes!(get_board_led, patch_board_led))
         .routes(routes!(post_reboot))
         .routes(routes!(get_sources))
         .routes(routes!(get_source))
@@ -386,6 +387,93 @@ async fn patch_board_pause(
     {
         crate::board::nano3s::write_pause_command(req.paused)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(StatusCode::OK)
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Return the currently commanded LED state.
+#[utoipa::path(
+    get,
+    path = "/boards/{name}/led",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    responses(
+        (status = OK, description = "Current LED state", body = BoardLedState),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support LED control"),
+    ),
+)]
+async fn get_board_led(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<BoardLedState>, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        Ok(Json(crate::board::nano3s::get_led_state()))
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Live-edit the status LED strip, no reboot required.
+///
+/// `effect="auto"` (the default) returns the strip to automatic status
+/// indication; any other effect hands it to manual control until
+/// switched back. Fields left unset keep their current value.
+#[utoipa::path(
+    patch,
+    path = "/boards/{name}/led",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    request_body = BoardLedRequest,
+    responses(
+        (status = OK, description = "LED command accepted and applied"),
+        (status = BAD_REQUEST, description = "Unknown effect name or malformed color"),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support LED control"),
+    ),
+)]
+async fn patch_board_led(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Json(req): Json<BoardLedRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        crate::board::nano3s::write_led_command(req.effect, req.color, req.brightness, req.speed)
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
         Ok(StatusCode::OK)
     }
     #[cfg(not(feature = "nano3s"))]

@@ -155,6 +155,41 @@ pub struct BoardPauseRequest {
     pub paused: bool,
 }
 
+/// Request body for `PATCH /api/v0/boards/{name}/led`.
+///
+/// Live-edits a board's status LED strip, no reboot required. `effect`
+/// is one of `"auto"` (default; automatic status indication), `"off"`,
+/// `"solid"`, `"rainbow"`, `"colorloop"`, `"breathe"`, `"blink"`,
+/// `"chase"`, `"chase_rainbow"`, `"scanner"`, `"twinkle"`, or
+/// `"fire_flicker"` -- see `board::nano3s::LedEffect` for what each does.
+/// Not every effect uses every field (e.g. `"rainbow"` ignores `color`).
+/// Any field left unset keeps its current value -- e.g. a
+/// `brightness`-only request doesn't reset `effect`. `color` is a
+/// `#RRGGBB` hex string.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct BoardLedRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<u8>,
+}
+
+/// Response body for `GET /api/v0/boards/{name}/led` -- the currently
+/// commanded LED state. Note this is the last command applied, not
+/// necessarily the color on the strip right now: under `effect: "auto"`
+/// the strip follows board status independent of `color`/`speed`.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BoardLedState {
+    pub effect: String,
+    pub color: String,
+    pub brightness: u8,
+    pub speed: u8,
+}
+
 /// Job source telemetry.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct SourceTelemetry {

@@ -23,6 +23,10 @@ const DASHBOARD_HTML: &str = include_str!("../../assets/dashboard.html");
 /// Per-chip and chain-wide detail page, separate from `/dashboard`'s
 /// fleet-overview cards.
 const INFO_HTML: &str = include_str!("../../assets/info.html");
+/// WLED-inspired status LED control page (effect/color/brightness/speed),
+/// separate from `/dashboard` since it's a standing control surface, not
+/// a telemetry view.
+const LED_HTML: &str = include_str!("../../assets/led.html");
 /// Header brandmark -- mujina-head-mark.svg from rkuester's
 /// mujina-logo-set (github.com/rkuester/mujina-logo-set), used with the
 /// author's permission. Served from its own route rather than inlined
@@ -77,6 +81,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/dashboard", routing::get(serve_page))
         .route("/data", routing::get(serve_data))
         .route("/info", routing::get(serve_info_page))
+        .route("/led", routing::get(serve_led_page))
         .route("/nano3s-detail", routing::get(serve_nano3s_detail))
         .route("/mujina-head-mark.svg", routing::get(serve_logo_svg))
         .route("/doom/launch", routing::post(launch_doom))
@@ -121,6 +126,10 @@ async fn launch_doom() -> Json<Value> {
 
 async fn serve_info_page() -> impl IntoResponse {
     Html(INFO_HTML)
+}
+
+async fn serve_led_page() -> impl IntoResponse {
+    Html(LED_HTML)
 }
 
 /// Per-chip and chain-wide detail from the latest `IPC_MSG_STATUS`.

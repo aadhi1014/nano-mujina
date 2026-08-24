@@ -953,6 +953,432 @@ fn read_and_clear_control_file() -> Option<String> {
     Some(cmd)
 }
 
+/// Status LED strip driven via the `/dev/ws2812` char device (see
+/// `NANO3S_GPIO_MAP.md`'s I2S-WS2812 entry). Wire format confirmed by
+/// direct hardware test (not from any vendor source): one `write()` of
+/// exactly `WS2812_LED_COUNT * 3` bytes, 3 bytes per LED in
+/// green,red,blue order. Physical LED index 0 is the rightmost LED as
+/// viewed from the front of the board; index `WS2812_LED_COUNT - 1` is
+/// leftmost -- irrelevant here since every state below lights the whole
+/// strip one uniform color.
+const WS2812_DEV_PATH: &str = "/dev/ws2812";
+const WS2812_LED_COUNT: usize = 9;
+
+/// Status colors, deliberately dim (out of 255 per channel) since this is
+/// a close-range status indicator, not a display.
+mod led_color {
+    pub const INITIALIZING: (u8, u8, u8) = (0, 0, 40); // dim blue
+    pub const HASHING: (u8, u8, u8) = (0, 40, 0); // dim green
+    pub const IDLE: (u8, u8, u8) = (40, 25, 0); // dim amber
+    pub const FAULT: (u8, u8, u8) = (60, 0, 0); // dim red
+}
+
+struct Ws2812Strip {
+    file: Option<std::fs::File>,
+    last: Option<[(u8, u8, u8); WS2812_LED_COUNT]>,
+}
+
+impl Ws2812Strip {
+    fn open() -> Self {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(WS2812_DEV_PATH)
+            .map_err(|e| eprintln!("[nano3s] failed to open {WS2812_DEV_PATH}: {e}"))
+            .ok();
+        Self { file, last: None }
+    }
+
+    /// Sets each LED individually. No-op (no write issued) if this is the
+    /// same set of colors already applied.
+    fn set(&mut self, colors: [(u8, u8, u8); WS2812_LED_COUNT]) {
+        if self.last == Some(colors) {
+            return;
+        }
+        if let Some(file) = self.file.as_mut() {
+            use std::io::Write;
+            let mut buf = [0u8; WS2812_LED_COUNT * 3];
+            for (chunk, (r, g, b)) in buf.chunks_exact_mut(3).zip(colors.iter()) {
+                chunk.copy_from_slice(&[*g, *r, *b]);
+            }
+            if let Err(e) = file.write_all(&buf) {
+                eprintln!("[nano3s] failed to write {WS2812_DEV_PATH}: {e}");
+            }
+        }
+        self.last = Some(colors);
+    }
+
+    /// Sets every LED to the same color.
+    fn set_all(&mut self, rgb: (u8, u8, u8)) {
+        self.set([rgb; WS2812_LED_COUNT]);
+    }
+
+    fn off(&mut self) {
+        self.set_all((0, 0, 0));
+    }
+}
+
+/// Manual LED override, written via `PATCH /api/v0/boards/{name}/led`
+/// (see [`write_led_command`]) and read every ~200ms tick by
+/// `run_worker()`. `Auto` (the default) means "no override -- show
+/// automatic status color" (`led_color`); the other effects hand the
+/// whole strip to the `/led` dashboard page until switched back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LedEffect {
+    Auto,
+    Off,
+    Solid,
+    /// Full hue cycle spread evenly across the strip, rotating.
+    Rainbow,
+    /// Whole strip one color, that color's hue slowly rotating (unlike
+    /// Rainbow, every LED always matches).
+    Colorloop,
+    /// `color` at `brightness`, sinusoidally pulsing.
+    Breathe,
+    /// `color` at `brightness`, hard on/off toggle.
+    Blink,
+    /// WLED "Theater Chase": every 3rd LED lit in `color`, the pattern
+    /// shifting by one LED per step.
+    Chase,
+    /// Chase, but each lit group's hue advances over time instead of
+    /// using a fixed `color`.
+    ChaseRainbow,
+    /// Single lit LED (with a soft decaying tail) bouncing end to end
+    /// ("Larson scanner"/Cylon eye), in `color`.
+    Scanner,
+    /// Random LEDs flash to full brightness in `color`, then decay.
+    Twinkle,
+    /// Warm flicker (WLED "Fire Flicker"): every LED independently
+    /// jitters brightness and hue within a red/orange/amber range.
+    /// Ignores `color` -- always warm.
+    FireFlicker,
+}
+
+impl LedEffect {
+    fn as_str(self) -> &'static str {
+        match self {
+            LedEffect::Auto => "auto",
+            LedEffect::Off => "off",
+            LedEffect::Solid => "solid",
+            LedEffect::Rainbow => "rainbow",
+            LedEffect::Colorloop => "colorloop",
+            LedEffect::Breathe => "breathe",
+            LedEffect::Blink => "blink",
+            LedEffect::Chase => "chase",
+            LedEffect::ChaseRainbow => "chase_rainbow",
+            LedEffect::Scanner => "scanner",
+            LedEffect::Twinkle => "twinkle",
+            LedEffect::FireFlicker => "fire_flicker",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "auto" => Ok(LedEffect::Auto),
+            "off" => Ok(LedEffect::Off),
+            "solid" => Ok(LedEffect::Solid),
+            "rainbow" => Ok(LedEffect::Rainbow),
+            "colorloop" => Ok(LedEffect::Colorloop),
+            "breathe" => Ok(LedEffect::Breathe),
+            "blink" => Ok(LedEffect::Blink),
+            "chase" => Ok(LedEffect::Chase),
+            "chase_rainbow" => Ok(LedEffect::ChaseRainbow),
+            "scanner" => Ok(LedEffect::Scanner),
+            "twinkle" => Ok(LedEffect::Twinkle),
+            "fire_flicker" => Ok(LedEffect::FireFlicker),
+            other => Err(format!(
+                "unknown LED effect '{other}' (want auto/off/solid/rainbow/colorloop/breathe/blink/chase/chase_rainbow/scanner/twinkle/fire_flicker)"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LedOverrideState {
+    effect: LedEffect,
+    color: (u8, u8, u8),
+    brightness: u8,
+    speed: u8,
+}
+
+/// Global manual LED state, shared between the API handler (async, in the
+/// axum server task) and `run_worker()`'s own OS thread. Defaults to
+/// `Auto`/off-brightness-doesn't-matter until a `PATCH .../led` request
+/// sets something else.
+static LED_OVERRIDE: std::sync::Mutex<LedOverrideState> = std::sync::Mutex::new(LedOverrideState {
+    effect: LedEffect::Auto,
+    color: (255, 0, 0),
+    brightness: 128,
+    speed: 128,
+});
+
+fn parse_hex_color(s: &str) -> Result<(u8, u8, u8), String> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 {
+        return Err(format!("invalid color '{s}' (want #RRGGBB)"));
+    }
+    let byte = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("invalid color '{s}' (want #RRGGBB)"));
+    Ok((byte(0)?, byte(2)?, byte(4)?))
+}
+
+/// Live-edits the WS2812 status strip's manual override, no reboot
+/// required. See [`crate::api_client::types::BoardLedRequest`] for field
+/// semantics. Any argument left `None` keeps that field's current value.
+/// Returns an error string (for the handler to turn into a 400) on an
+/// unknown effect name or malformed color.
+pub(crate) fn write_led_command(effect: Option<String>, color: Option<String>, brightness: Option<u8>, speed: Option<u8>) -> Result<(), String> {
+    let mut state = LED_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = effect {
+        state.effect = LedEffect::parse(&e)?;
+    }
+    if let Some(c) = color {
+        state.color = parse_hex_color(&c)?;
+    }
+    if let Some(b) = brightness {
+        state.brightness = b;
+    }
+    if let Some(s) = speed {
+        state.speed = s;
+    }
+    Ok(())
+}
+
+/// Current commanded LED state, for `GET /api/v0/boards/{name}/led`.
+pub(crate) fn get_led_state() -> crate::api_client::types::BoardLedState {
+    let state = *LED_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    crate::api_client::types::BoardLedState {
+        effect: state.effect.as_str().to_string(),
+        color: format!("#{:02x}{:02x}{:02x}", state.color.0, state.color.1, state.color.2),
+        brightness: state.brightness,
+        speed: state.speed,
+    }
+}
+
+/// Standard HSV -> RGB conversion. `h` in degrees (any range, wrapped
+/// mod 360); `s`/`v` in `[0,1]`.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = h.rem_euclid(360.0);
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (((r1 + m) * 255.0).round() as u8, ((g1 + m) * 255.0).round() as u8, ((b1 + m) * 255.0).round() as u8)
+}
+
+/// Degrees the rainbow-chase phase advances per ~200ms tick at
+/// `speed=255` -- one full 9-LED hue spacing per tick. `speed=0` freezes
+/// the pattern (step is 0).
+fn rainbow_step_deg(speed: u8) -> f32 {
+    (speed as f32 / 255.0) * (360.0 / WS2812_LED_COUNT as f32)
+}
+
+/// Renders one frame of the rainbow-chase effect: a full hue cycle spread
+/// evenly across the strip at the given phase (degrees; the caller owns
+/// and advances this each tick by [`rainbow_step_deg`], wrapping happens
+/// naturally via `hsv_to_rgb`'s `rem_euclid`). `brightness` (0-255)
+/// scales value (HSV `v`), not saturation, so colors stay fully
+/// saturated while dimming.
+fn rainbow_frame(phase_deg: f32, brightness: u8) -> [(u8, u8, u8); WS2812_LED_COUNT] {
+    let v = brightness as f32 / 255.0;
+    let mut colors = [(0u8, 0u8, 0u8); WS2812_LED_COUNT];
+    for (i, c) in colors.iter_mut().enumerate() {
+        let hue = phase_deg + i as f32 * (360.0 / WS2812_LED_COUNT as f32);
+        *c = hsv_to_rgb(hue, 1.0, v);
+    }
+    colors
+}
+
+/// Scales an (r,g,b) color by a `[0,1]` level (clamped), for effects that
+/// dim/pulse a fixed user color rather than working in HSV.
+fn scale_color(rgb: (u8, u8, u8), level: f32) -> (u8, u8, u8) {
+    let level = level.clamp(0.0, 1.0);
+    ((rgb.0 as f32 * level).round() as u8, (rgb.1 as f32 * level).round() as u8, (rgb.2 as f32 * level).round() as u8)
+}
+
+/// Tiny xorshift32 PRNG for Twinkle/FireFlicker's per-pixel randomness --
+/// not worth pulling in the `rand` crate for a couple of sparkle rolls
+/// per tick. Not cryptographic, doesn't need to be.
+fn xorshift32(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    x
+}
+
+fn rand_unit(state: &mut u32) -> f32 {
+    (xorshift32(state) as f32) / (u32::MAX as f32)
+}
+
+/// Per-tick animation memory for effects that need more than the single
+/// [`LedOverrideState`] snapshot: phase accumulators, per-pixel decay,
+/// PRNG state. Owned by `run_worker()`'s thread. Auto/Off/Solid are
+/// simple enough to render directly in `run_worker()` and don't use
+/// this; every other [`LedEffect`] goes through [`AnimState::frame`].
+struct AnimState {
+    effect: LedEffect,
+    phase_deg: f32,
+    chase_pos: f32,
+    scanner_pos: f32,
+    scanner_dir: f32,
+    blink_on: bool,
+    blink_accum: f32,
+    twinkle: [f32; WS2812_LED_COUNT],
+    fire: [f32; WS2812_LED_COUNT],
+    rng: u32,
+}
+
+impl AnimState {
+    fn new() -> Self {
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0).max(1);
+        Self {
+            effect: LedEffect::Auto,
+            phase_deg: 0.0,
+            chase_pos: 0.0,
+            scanner_pos: 0.0,
+            scanner_dir: 1.0,
+            blink_on: true,
+            blink_accum: 0.0,
+            twinkle: [0.0; WS2812_LED_COUNT],
+            fire: [0.6; WS2812_LED_COUNT],
+            rng: seed,
+        }
+    }
+
+    /// Resets phase/decay memory when the commanded effect changes, so
+    /// e.g. Scanner doesn't resume mid-sweep after time spent on Solid.
+    fn sync_effect(&mut self, effect: LedEffect) {
+        if self.effect != effect {
+            self.effect = effect;
+            self.phase_deg = 0.0;
+            self.chase_pos = 0.0;
+            self.scanner_pos = 0.0;
+            self.scanner_dir = 1.0;
+            self.blink_on = true;
+            self.blink_accum = 0.0;
+            self.twinkle = [0.0; WS2812_LED_COUNT];
+        }
+    }
+
+    /// Renders one frame for `ov.effect` and advances this state by one
+    /// ~200ms tick. Must be preceded by [`Self::sync_effect`] in the same
+    /// tick. Panics-free fallback (all-off) for Auto/Off/Solid, which
+    /// `run_worker()` never actually routes here.
+    fn frame(&mut self, ov: LedOverrideState) -> [(u8, u8, u8); WS2812_LED_COUNT] {
+        let v = ov.brightness as f32 / 255.0;
+        let speed_frac = ov.speed as f32 / 255.0;
+        match ov.effect {
+            LedEffect::Rainbow => {
+                self.phase_deg += rainbow_step_deg(ov.speed);
+                rainbow_frame(self.phase_deg, ov.brightness)
+            }
+            LedEffect::Colorloop => {
+                self.phase_deg = (self.phase_deg + speed_frac * 6.0) % 360.0;
+                [hsv_to_rgb(self.phase_deg, 1.0, v); WS2812_LED_COUNT]
+            }
+            LedEffect::Breathe => {
+                self.phase_deg = (self.phase_deg + speed_frac * 12.0) % 360.0;
+                // Floor at 8% so the color never fully vanishes into a
+                // dead-looking black between breaths.
+                let level = 0.08 + 0.92 * (0.5 - 0.5 * self.phase_deg.to_radians().cos());
+                [scale_color(ov.color, v * level); WS2812_LED_COUNT]
+            }
+            LedEffect::Blink => {
+                self.blink_accum += 4.0 + speed_frac * 40.0;
+                if self.blink_accum >= 100.0 {
+                    self.blink_accum = 0.0;
+                    self.blink_on = !self.blink_on;
+                }
+                let level = if self.blink_on { v } else { 0.0 };
+                [scale_color(ov.color, level); WS2812_LED_COUNT]
+            }
+            LedEffect::Chase => {
+                self.chase_pos = (self.chase_pos + 0.2 + speed_frac * 2.0) % WS2812_LED_COUNT as f32;
+                let mut colors = [(0u8, 0u8, 0u8); WS2812_LED_COUNT];
+                let pos = self.chase_pos as i32;
+                for (i, c) in colors.iter_mut().enumerate() {
+                    if (i as i32 - pos).rem_euclid(3) == 0 {
+                        *c = scale_color(ov.color, v);
+                    }
+                }
+                colors
+            }
+            LedEffect::ChaseRainbow => {
+                self.chase_pos = (self.chase_pos + 0.2 + speed_frac * 2.0) % WS2812_LED_COUNT as f32;
+                self.phase_deg = (self.phase_deg + 3.0 + speed_frac * 6.0) % 360.0;
+                let mut colors = [(0u8, 0u8, 0u8); WS2812_LED_COUNT];
+                let pos = self.chase_pos as i32;
+                for (i, c) in colors.iter_mut().enumerate() {
+                    if (i as i32 - pos).rem_euclid(3) == 0 {
+                        *c = hsv_to_rgb(self.phase_deg + i as f32 * 15.0, 1.0, v);
+                    }
+                }
+                colors
+            }
+            LedEffect::Scanner => {
+                let span = (WS2812_LED_COUNT - 1) as f32;
+                self.scanner_pos += self.scanner_dir * (0.1 + speed_frac * 0.9);
+                if self.scanner_pos >= span {
+                    self.scanner_pos = span;
+                    self.scanner_dir = -1.0;
+                } else if self.scanner_pos <= 0.0 {
+                    self.scanner_pos = 0.0;
+                    self.scanner_dir = 1.0;
+                }
+                let mut colors = [(0u8, 0u8, 0u8); WS2812_LED_COUNT];
+                for (i, c) in colors.iter_mut().enumerate() {
+                    let dist = (i as f32 - self.scanner_pos).abs();
+                    let level = (1.0 - dist / 1.5).clamp(0.0, 1.0);
+                    *c = scale_color(ov.color, v * level);
+                }
+                colors
+            }
+            LedEffect::Twinkle => {
+                // Spawn chance per LED per tick scales with speed; each
+                // spark decays geometrically toward 0.
+                let spawn_chance = 0.02 + speed_frac * 0.2;
+                for t in self.twinkle.iter_mut() {
+                    if *t <= 0.01 && rand_unit(&mut self.rng) < spawn_chance {
+                        *t = 1.0;
+                    } else {
+                        *t *= 0.80;
+                    }
+                }
+                let mut colors = [(0u8, 0u8, 0u8); WS2812_LED_COUNT];
+                for (i, c) in colors.iter_mut().enumerate() {
+                    *c = scale_color(ov.color, v * self.twinkle[i]);
+                }
+                colors
+            }
+            LedEffect::FireFlicker => {
+                // Always warm (deep red -> orange -> amber), ignoring
+                // `ov.color` entirely -- `color` persists across effect
+                // switches (see write_led_command()'s "unset keeps
+                // current value" semantics), so a fixed-hue interpretation
+                // of it here would inherit whatever was last picked for a
+                // *different* effect (e.g. white from Twinkle), which
+                // isn't fire-colored at all.
+                let mut colors = [(0u8, 0u8, 0u8); WS2812_LED_COUNT];
+                for (i, c) in colors.iter_mut().enumerate() {
+                    let jitter = 0.55 + rand_unit(&mut self.rng) * 0.45;
+                    self.fire[i] = self.fire[i] * 0.5 + jitter * 0.5;
+                    let hue = 8.0 + rand_unit(&mut self.rng) * 22.0;
+                    *c = hsv_to_rgb(hue, 1.0, v * self.fire[i]);
+                }
+                colors
+            }
+            LedEffect::Auto | LedEffect::Off | LedEffect::Solid => [(0, 0, 0); WS2812_LED_COUNT],
+        }
+    }
+}
+
 /// Status file read by fb_draw (the LCD renderer). Fields with no direct
 /// source here are approximated or omitted; fb_draw treats a missing key
 /// as "unknown"/false rather than a wrong value.
@@ -1018,10 +1444,17 @@ fn run_worker(
     status: Arc<Mutex<HashThreadStatus>>,
     telemetry_tx: watch::Sender<BoardTelemetry>,
 ) {
+    let mut led = Ws2812Strip::open();
+    led.set_all(led_color::INITIALIZING);
+    // Phase/decay/PRNG memory for the animated LED effects (everything
+    // except Auto/Off/Solid); persists across ticks.
+    let mut anim = AnimState::new();
+
     let rc = unsafe { nano3s_ipc_open() };
     let ipc_ok = rc == 0;
     if !ipc_ok {
         eprintln!("[nano3s] nano3s_ipc_open failed -- board will report no status/hashrate");
+        led.set_all(led_color::FAULT);
         // Fall through: still process commands so the scheduler doesn't
         // hang waiting on responses, but nothing will ever hash.
     } else {
@@ -1230,11 +1663,13 @@ fn run_worker(
                     let _ = response_tx.send(Ok(old));
                 }
                 Ok(WorkerCommand::Shutdown) => {
+                    led.off();
                     unsafe { nano3s_ipc_close() };
                     return;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    led.off();
                     unsafe { nano3s_ipc_close() };
                     return;
                 }
@@ -1421,6 +1856,27 @@ fn run_worker(
             }
         }
         write_live_status(ipc_ok, current_job_id, shares_found, is_idle, &st, last_power_w, current_difficulty);
+
+        {
+            let ov = *LED_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+            anim.sync_effect(ov.effect);
+            match ov.effect {
+                LedEffect::Auto => {
+                    led.set_all(if !ipc_ok {
+                        led_color::FAULT
+                    } else if is_idle || manual_pause {
+                        led_color::IDLE
+                    } else if current_task.is_some() {
+                        led_color::HASHING
+                    } else {
+                        led_color::INITIALIZING
+                    });
+                }
+                LedEffect::Off => led.off(),
+                LedEffect::Solid => led.set_all(scale_color(ov.color, ov.brightness as f32 / 255.0)),
+                _ => led.set(anim.frame(ov)),
+            }
+        }
 
         std::thread::sleep(Duration::from_millis(200));
     }

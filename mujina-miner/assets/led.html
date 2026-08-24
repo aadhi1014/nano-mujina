@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUJINA // LED</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cyan: #00f0ff;
+    --mag: #ff2e97;
+    --lime: #c8ff00;
+    --amber: #ffb000;
+    --green: #1bff9c;
+    --red: #ff3860;
+    --purple: #b967ff;
+    --bg: #05060c;
+    --panel: #0a0f1c;
+    --panel2: #0d1424;
+    --line: #14243a;
+    --dim: #4a6a86;
+    --ink: #d6f7ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Share Tech Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 24px 20px 60px; }
+  .top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 20px;
+    flex-wrap: wrap; gap: 10px;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-weight: 900; margin: 0;
+    font-size: 22px; letter-spacing: .16em; text-transform: uppercase;
+  }
+  h1 .chev { color: var(--cyan); text-shadow: 0 0 8px rgba(0,240,255,.5); }
+  .nav a {
+    color: var(--dim); text-decoration: none; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; margin-left: 18px;
+    border-bottom: 1px solid transparent; padding-bottom: 3px;
+  }
+  .nav a:hover, .nav a.active { color: var(--cyan); border-color: var(--cyan); }
+  .status-strip {
+    display: flex; gap: 8px; align-items: center; font-size: 12px;
+    color: var(--dim); letter-spacing: .05em;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+  .sec { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 12px;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--dim);
+    margin: 28px 0 12px; display: flex; align-items: center; gap: 10px; }
+  .sec:first-of-type { margin-top: 0; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+
+  /* Live strip preview -- 9 pixels, mirrors the physical WS2812 strip */
+  .strip { display: flex; gap: 6px; padding: 18px; background: var(--panel);
+    border: 1px solid var(--line); justify-content: center; }
+  .px { width: 34px; height: 34px; border-radius: 50%; background: #000;
+    border: 1px solid var(--line); box-shadow: inset 0 0 6px rgba(0,0,0,.6); transition: background .1s linear; }
+  .px.lit { border-color: rgba(255,255,255,.25); }
+
+  .panel-card { background: var(--panel); border: 1px solid var(--line); padding: 16px; }
+
+  /* Effect picker */
+  .effects { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .eff-btn {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+    padding: 12px 6px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+    font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
+    cursor: pointer; border-radius: 2px; transition: all .12s;
+  }
+  .eff-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .eff-btn.active { border-color: var(--cyan); color: var(--cyan); background: rgba(0,240,255,.1);
+    box-shadow: 0 0 12px rgba(0,240,255,.3); }
+  .eff-btn.active.eff-off { border-color: var(--dim); color: var(--ink); background: var(--panel2); box-shadow: none; }
+
+  .controls { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 18px; align-items: flex-start; }
+  .wheel-block { display: flex; flex-direction: column; align-items: center; gap: 10px; transition: opacity .15s; }
+  #wheel { border-radius: 50%; cursor: crosshair; touch-action: none; }
+  .swatches { display: flex; gap: 6px; margin-top: 4px; }
+  .swatch { width: 22px; height: 22px; border-radius: 4px; cursor: pointer; border: 1px solid rgba(255,255,255,.2); }
+  .swatch:hover { outline: 1px solid var(--cyan); }
+
+  .sliders { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 18px; }
+  .slider-row { transition: opacity .15s; }
+  .slider-row .label { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--dim); margin-bottom: 8px;
+    display: flex; justify-content: space-between; }
+  .slider-row .label .val { color: var(--cyan); font-family: 'Orbitron', sans-serif; }
+  input[type=range] {
+    -webkit-appearance: none; width: 100%; height: 6px; border-radius: 3px;
+    background: linear-gradient(90deg, var(--line), var(--line));
+    outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--cyan); box-shadow: 0 0 8px var(--cyan); cursor: pointer; border: 2px solid #04121a;
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 18px; height: 18px; border-radius: 50%; background: var(--cyan);
+    box-shadow: 0 0 8px var(--cyan); cursor: pointer; border: 2px solid #04121a;
+  }
+  .dimmed { opacity: .25; pointer-events: none; }
+
+  .hexval { font-family: 'Orbitron', sans-serif; font-size: 14px; color: var(--ink); letter-spacing: .05em; }
+  .eff-desc { color: var(--dim); font-size: 11px; margin-top: 14px; letter-spacing: .03em; }
+
+  .msg { padding: 40px; text-align: center; color: var(--dim); font-size: 13px; letter-spacing: .05em; }
+  .msg.err { color: var(--red); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1><span class="chev">//</span>MUJINA <span style="color:var(--dim);font-weight:400">/ LED</span></h1>
+    <div style="display:flex;align-items:center;gap:18px">
+      <div class="status-strip"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+      <nav class="nav">
+        <a href="/dashboard">Dashboard</a>
+        <a href="/info">Info</a>
+        <a href="/led" class="active">LED</a>
+      </nav>
+    </div>
+  </div>
+
+  <div id="body">
+    <div class="msg">loading…</div>
+  </div>
+</div>
+
+<script>
+function $(id) { return document.getElementById(id); }
+
+let BOARD = null;
+let STATE = { effect: 'auto', color: '#ff0000', brightness: 128, speed: 128 };
+let DRAGGING = false;
+
+// Effect catalog. `needsColor`/`needsSpeed` drive which controls are
+// enabled per effect; `desc` is shown under the controls.
+const EFFECTS = [
+  { key: 'auto',          label: 'Auto',          needsColor: false, needsSpeed: false, desc: 'Follows board status: blue while connecting, green while hashing, amber when paused, red on fault.' },
+  { key: 'off',            label: 'Off',           needsColor: false, needsSpeed: false, desc: 'Strip off.' },
+  { key: 'solid',          label: 'Solid',         needsColor: true,  needsSpeed: false, desc: 'Whole strip, one fixed color.' },
+  { key: 'rainbow',        label: 'Rainbow',       needsColor: false, needsSpeed: true,  desc: 'Full hue cycle spread across the strip, rotating.' },
+  { key: 'colorloop',      label: 'Colorloop',     needsColor: false, needsSpeed: true,  desc: 'Whole strip one color, that color slowly cycling through hues.' },
+  { key: 'breathe',        label: 'Breathe',       needsColor: true,  needsSpeed: true,  desc: 'Color fades in and out.' },
+  { key: 'blink',          label: 'Blink',         needsColor: true,  needsSpeed: true,  desc: 'Color hard on/off toggle.' },
+  { key: 'chase',          label: 'Chase',         needsColor: true,  needsSpeed: true,  desc: 'Theater chase -- every 3rd LED lit, marching along the strip.' },
+  { key: 'chase_rainbow',  label: 'Chase Rainbow', needsColor: false, needsSpeed: true,  desc: 'Chase, but the lit LEDs cycle through hues.' },
+  { key: 'scanner',        label: 'Scanner',       needsColor: true,  needsSpeed: true,  desc: 'Single LED with a soft tail, bouncing end to end (Cylon eye).' },
+  { key: 'twinkle',        label: 'Twinkle',       needsColor: true,  needsSpeed: true,  desc: 'Random LEDs flash and fade.' },
+  { key: 'fire_flicker',   label: 'Fire Flicker',  needsColor: false, needsSpeed: true,  desc: 'Warm flicker across red/orange/amber. Ignores your color pick -- always warm.' },
+];
+const EFFECT_MAP = Object.fromEntries(EFFECTS.map(e => [e.key, e]));
+
+// Client-side preview animation state, mirrors the server's AnimState
+// (nano3s.rs) closely enough to look right -- doesn't need to be
+// frame-identical, the server is authoritative for the real strip.
+const P = { phase: 0, chasePos: 0, scannerPos: 0, scannerDir: 1, blinkOn: true, blinkAccum: 0, twinkle: new Array(9).fill(0), fire: new Array(9).fill(0.6) };
+
+function bodyShell() {
+  $('body').innerHTML = `
+    <div class="sec">Strip Preview</div>
+    <div class="strip" id="strip"></div>
+
+    <div class="sec">Effect</div>
+    <div class="panel-card">
+      <div class="effects" id="effects"></div>
+
+      <div class="controls">
+        <div class="wheel-block" id="wheelBlock">
+          <canvas id="wheel" width="180" height="180"></canvas>
+          <div class="hexval" id="hexval">#ff0000</div>
+          <div class="swatches" id="swatches"></div>
+        </div>
+        <div class="sliders">
+          <div class="slider-row" id="brightnessRow">
+            <div class="label">Brightness <span class="val" id="brightVal">128</span></div>
+            <input type="range" id="brightSlider" min="0" max="255" value="128">
+          </div>
+          <div class="slider-row" id="speedRow">
+            <div class="label">Speed <span class="val" id="speedVal">128</span></div>
+            <input type="range" id="speedSlider" min="0" max="255" value="128">
+          </div>
+        </div>
+      </div>
+      <div class="eff-desc" id="effDesc"></div>
+    </div>
+  `;
+  buildStrip();
+  buildEffectButtons();
+  buildSwatches();
+  buildWheel();
+  wireSliders();
+}
+
+function buildStrip() {
+  const strip = $('strip');
+  strip.innerHTML = '';
+  for (let i = 0; i < 9; i++) {
+    const d = document.createElement('div');
+    d.className = 'px';
+    d.id = 'px' + i;
+    strip.appendChild(d);
+  }
+}
+
+function buildEffectButtons() {
+  const wrap = $('effects');
+  wrap.innerHTML = '';
+  EFFECTS.forEach(e => {
+    const b = document.createElement('button');
+    b.className = 'eff-btn' + (e.key === 'off' ? ' eff-off' : '');
+    b.textContent = e.label;
+    b.dataset.effect = e.key;
+    b.onclick = () => setEffect(e.key);
+    wrap.appendChild(b);
+  });
+  applyEffectUi();
+}
+
+function applyEffectUi() {
+  const meta = EFFECT_MAP[STATE.effect] || EFFECT_MAP.auto;
+  document.querySelectorAll('.eff-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.effect === STATE.effect);
+  });
+  $('wheelBlock').classList.toggle('dimmed', !meta.needsColor);
+  $('brightnessRow').classList.toggle('dimmed', STATE.effect === 'auto' || STATE.effect === 'off');
+  $('speedRow').classList.toggle('dimmed', !meta.needsSpeed);
+  $('effDesc').textContent = meta.desc;
+  // Reset preview animation memory on effect change so e.g. Scanner
+  // doesn't resume mid-sweep with a stale position.
+  P.phase = 0; P.chasePos = 0; P.scannerPos = 0; P.scannerDir = 1; P.blinkOn = true; P.blinkAccum = 0;
+  P.twinkle.fill(0);
+}
+
+const SWATCHES = ['#ff0000', '#ff8800', '#ffee00', '#1bff9c', '#00f0ff', '#2e6bff', '#b967ff', '#ff2e97', '#ffffff'];
+function buildSwatches() {
+  const wrap = $('swatches');
+  wrap.innerHTML = '';
+  SWATCHES.forEach(hex => {
+    const s = document.createElement('div');
+    s.className = 'swatch';
+    s.style.background = hex;
+    s.onclick = () => {
+      STATE.color = hex;
+      renderWheelDot();
+      $('hexval').textContent = hex;
+      if (!EFFECT_MAP[STATE.effect].needsColor) setEffect('solid', false);
+      pushState();
+    };
+    wrap.appendChild(s);
+  });
+}
+
+// HSV color wheel: hue = angle, saturation = radius. Drawn once as an
+// ImageData bitmap, then a small dot marks the currently selected color.
+let wheelCtx = null;
+const WHEEL_R = 90;
+function buildWheel() {
+  const canvas = $('wheel');
+  wheelCtx = canvas.getContext('2d');
+  const img = wheelCtx.createImageData(180, 180);
+  for (let y = 0; y < 180; y++) {
+    for (let x = 0; x < 180; x++) {
+      const dx = x - WHEEL_R, dy = y - WHEEL_R;
+      const r = Math.sqrt(dx * dx + dy * dy);
+      const idx = (y * 180 + x) * 4;
+      if (r > WHEEL_R) { img.data[idx + 3] = 0; continue; }
+      const hue = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+      const sat = Math.min(1, r / WHEEL_R);
+      const [cr, cg, cb] = hsvToRgb(hue, sat, 1);
+      img.data[idx] = cr; img.data[idx + 1] = cg; img.data[idx + 2] = cb; img.data[idx + 3] = 255;
+    }
+  }
+  wheelCtx.putImageData(img, 0, 0);
+  WHEEL_BITMAP = wheelCtx.getImageData(0, 0, 180, 180);
+  renderWheelDot();
+
+  const pick = (clientX, clientY) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left, y = clientY - rect.top;
+    const dx = x - WHEEL_R, dy = y - WHEEL_R;
+    const r = Math.min(WHEEL_R, Math.sqrt(dx * dx + dy * dy));
+    const hue = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+    const sat = r / WHEEL_R;
+    const [cr, cg, cb] = hsvToRgb(hue, sat, 1);
+    STATE.color = rgbToHex(cr, cg, cb);
+    if (!EFFECT_MAP[STATE.effect].needsColor) setEffect('solid', false);
+    renderWheelDot();
+    $('hexval').textContent = STATE.color;
+    pushState();
+  };
+  const start = e => { DRAGGING = true; pick(e.touches ? e.touches[0].clientX : e.clientX, e.touches ? e.touches[0].clientY : e.clientY); e.preventDefault(); };
+  const move = e => { if (!DRAGGING) return; pick(e.touches ? e.touches[0].clientX : e.clientX, e.touches ? e.touches[0].clientY : e.clientY); e.preventDefault(); };
+  const end = () => { DRAGGING = false; };
+  canvas.addEventListener('mousedown', start);
+  canvas.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+  canvas.addEventListener('touchstart', start, { passive: false });
+  canvas.addEventListener('touchmove', move, { passive: false });
+  canvas.addEventListener('touchend', end);
+}
+
+let WHEEL_BITMAP = null;
+function renderWheelDot() {
+  if (!wheelCtx || !WHEEL_BITMAP) return;
+  const { h, s } = hexToHueSat(STATE.color);
+  const rad = h * Math.PI / 180;
+  const r = s * WHEEL_R;
+  const x = WHEEL_R + Math.cos(rad) * r;
+  const y = WHEEL_R + Math.sin(rad) * r;
+  wheelCtx.putImageData(WHEEL_BITMAP, 0, 0);
+  wheelCtx.beginPath();
+  wheelCtx.arc(x, y, 6, 0, Math.PI * 2);
+  wheelCtx.strokeStyle = '#fff';
+  wheelCtx.lineWidth = 2;
+  wheelCtx.stroke();
+}
+
+function hexToHueSat(hex) {
+  const r = parseInt(hex.slice(1, 3), 16) / 255, g = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  const s = max === 0 ? 0 : d / max;
+  return { h, s };
+}
+
+function hsvToRgb(h, s, v) {
+  h = ((h % 360) + 360) % 360;
+  const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+  let r1, g1, b1;
+  if (h < 60) [r1, g1, b1] = [c, x, 0];
+  else if (h < 120) [r1, g1, b1] = [x, c, 0];
+  else if (h < 180) [r1, g1, b1] = [0, c, x];
+  else if (h < 240) [r1, g1, b1] = [0, x, c];
+  else if (h < 300) [r1, g1, b1] = [x, 0, c];
+  else [r1, g1, b1] = [c, 0, x];
+  return [Math.round((r1 + m) * 255), Math.round((g1 + m) * 255), Math.round((b1 + m) * 255)];
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+}
+
+function scaleHex(hex, level) {
+  level = Math.max(0, Math.min(1, level));
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return rgbToHex(Math.round(r * level), Math.round(g * level), Math.round(b * level));
+}
+
+function wireSliders() {
+  const bs = $('brightSlider'), ss = $('speedSlider');
+  bs.value = STATE.brightness; ss.value = STATE.speed;
+  $('brightVal').textContent = STATE.brightness;
+  $('speedVal').textContent = STATE.speed;
+  bs.oninput = () => { STATE.brightness = +bs.value; $('brightVal').textContent = bs.value; pushState(); };
+  ss.oninput = () => { STATE.speed = +ss.value; $('speedVal').textContent = ss.value; pushState(); };
+}
+
+function setEffect(e, send) {
+  STATE.effect = e;
+  applyEffectUi();
+  if (send !== false) pushState();
+}
+
+let PUSH_TIMER = null;
+function pushState() {
+  // Coalesce rapid slider/wheel drag events into one request every ~80ms.
+  if (PUSH_TIMER) return;
+  PUSH_TIMER = setTimeout(async () => {
+    PUSH_TIMER = null;
+    if (!BOARD) return;
+    try {
+      await fetch(`/api/v0/boards/${encodeURIComponent(BOARD)}/led`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ effect: STATE.effect, color: STATE.color, brightness: STATE.brightness, speed: STATE.speed }),
+      });
+    } catch (e) { /* next poll will resync */ }
+  }, 80);
+}
+
+// Mirrors AnimState::frame() in nano3s.rs closely enough for a
+// representative live preview; the server is authoritative for the
+// actual hardware.
+function updatePreview() {
+  const strip = document.querySelectorAll('.px');
+  if (!strip.length) return;
+  const v = STATE.brightness / 255, speedFrac = STATE.speed / 255;
+  let colors;
+
+  switch (STATE.effect) {
+    case 'off':
+      colors = Array(9).fill('#000');
+      break;
+    case 'solid':
+      colors = Array(9).fill(scaleHex(STATE.color, v));
+      break;
+    case 'rainbow': {
+      P.phase = (P.phase + speedFrac * 40) % 360;
+      colors = Array.from({ length: 9 }, (_, i) => rgbToHex(...hsvToRgb(P.phase + i * 40, 1, v)));
+      break;
+    }
+    case 'colorloop': {
+      P.phase = (P.phase + speedFrac * 6) % 360;
+      colors = Array(9).fill(rgbToHex(...hsvToRgb(P.phase, 1, v)));
+      break;
+    }
+    case 'breathe': {
+      P.phase = (P.phase + speedFrac * 12) % 360;
+      const level = 0.08 + 0.92 * (0.5 - 0.5 * Math.cos(P.phase * Math.PI / 180));
+      colors = Array(9).fill(scaleHex(STATE.color, v * level));
+      break;
+    }
+    case 'blink': {
+      P.blinkAccum += 4 + speedFrac * 40;
+      if (P.blinkAccum >= 100) { P.blinkAccum = 0; P.blinkOn = !P.blinkOn; }
+      colors = Array(9).fill(scaleHex(STATE.color, P.blinkOn ? v : 0));
+      break;
+    }
+    case 'chase': {
+      P.chasePos = (P.chasePos + 0.2 + speedFrac * 2) % 9;
+      const pos = Math.trunc(P.chasePos);
+      colors = Array.from({ length: 9 }, (_, i) => (((i - pos) % 3) + 3) % 3 === 0 ? scaleHex(STATE.color, v) : '#000');
+      break;
+    }
+    case 'chase_rainbow': {
+      P.chasePos = (P.chasePos + 0.2 + speedFrac * 2) % 9;
+      P.phase = (P.phase + 3 + speedFrac * 6) % 360;
+      const pos = Math.trunc(P.chasePos);
+      colors = Array.from({ length: 9 }, (_, i) => (((i - pos) % 3) + 3) % 3 === 0 ? rgbToHex(...hsvToRgb(P.phase + i * 15, 1, v)) : '#000');
+      break;
+    }
+    case 'scanner': {
+      const span = 8;
+      P.scannerPos += P.scannerDir * (0.1 + speedFrac * 0.9);
+      if (P.scannerPos >= span) { P.scannerPos = span; P.scannerDir = -1; }
+      else if (P.scannerPos <= 0) { P.scannerPos = 0; P.scannerDir = 1; }
+      colors = Array.from({ length: 9 }, (_, i) => {
+        const dist = Math.abs(i - P.scannerPos);
+        const level = Math.max(0, Math.min(1, 1 - dist / 1.5));
+        return scaleHex(STATE.color, v * level);
+      });
+      break;
+    }
+    case 'twinkle': {
+      const spawnChance = 0.02 + speedFrac * 0.2;
+      colors = P.twinkle.map((t, i) => {
+        if (t <= 0.01 && Math.random() < spawnChance) t = 1.0; else t *= 0.80;
+        P.twinkle[i] = t;
+        return scaleHex(STATE.color, v * t);
+      });
+      break;
+    }
+    case 'fire_flicker': {
+      colors = P.fire.map((f, i) => {
+        const jitter = 0.55 + Math.random() * 0.45;
+        f = f * 0.5 + jitter * 0.5;
+        P.fire[i] = f;
+        const hue = 8 + Math.random() * 22;
+        return rgbToHex(...hsvToRgb(hue, 1, v * f));
+      });
+      break;
+    }
+    default: // auto: strip follows board status, not simulated here.
+      colors = Array(9).fill('#1a2436');
+  }
+
+  strip.forEach((el, i) => {
+    el.style.background = colors[i];
+    el.classList.toggle('lit', colors[i] !== '#000' && colors[i] !== '#000000');
+  });
+}
+
+async function findBoard() {
+  const r = await fetch('/api/v0/boards');
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const boards = await r.json();
+  return boards.length ? boards[0].name : null;
+}
+
+async function pollState() {
+  if (DRAGGING) return;
+  try {
+    if (!BOARD) BOARD = await findBoard();
+    if (!BOARD) {
+      $('connDot').className = 'dot bad';
+      $('connText').textContent = 'no boards connected';
+      return;
+    }
+    const r = await fetch(`/api/v0/boards/${encodeURIComponent(BOARD)}/led`);
+    if (r.status === 501) {
+      $('connDot').className = 'dot bad';
+      $('connText').textContent = 'not supported on this build';
+      $('body').innerHTML = '<div class="msg err">This mujina-minerd build has no LED-capable board driver compiled in.</div>';
+      return;
+    }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    STATE = d;
+    $('connDot').className = 'dot ok';
+    $('connText').textContent = 'live · ' + BOARD;
+    applyEffectUi();
+    $('brightSlider').value = d.brightness; $('brightVal').textContent = d.brightness;
+    $('speedSlider').value = d.speed; $('speedVal').textContent = d.speed;
+    $('hexval').textContent = d.color;
+    renderWheelDot();
+  } catch (e) {
+    $('connDot').className = 'dot bad';
+    $('connText').textContent = 'fetch failed: ' + e;
+  }
+}
+
+bodyShell();
+pollState();
+setInterval(pollState, 3000);
+setInterval(updatePreview, 100);
+</script>
+</body>
+</html>
