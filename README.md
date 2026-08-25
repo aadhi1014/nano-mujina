@@ -49,27 +49,60 @@ use. Unlike the stock image, no WiFi credentials or other
 device-specific data are baked in -- the device boots straight into
 first-time BLE setup.
 
-1) **Download the burning tool**: [K230BurningTool-Windows-v2.1.0](https://kendryte-download.canaan-creative.com/k230/downloads/burn_tool/v2.1.0/K230BurningTool-Windows-v2.1.0-0-gd24909e.zip)
-   and unzip it.
+1) **Get the burning tool**:
 
-2) **Open and select the image**: run `K230BurningTool.exe`, click
-   Open, select `nano-mujina-alpha-v2.kdimg`, set Image part name to
-   "all", and set Medium to "SPI NAND".
+   **Windows** -- [K230BurningTool-Windows-v2.1.0](https://kendryte-download.canaan-creative.com/k230/downloads/burn_tool/v2.1.0/K230BurningTool-Windows-v2.1.0-0-gd24909e.zip)
+   (unzip it, no install needed), a GUI tool.
+
+   **Linux / macOS** -- [`k230-flash`](https://github.com/kendryte/k230_flash_py),
+   the same vendor's official cross-platform CLI (and optional GUI):
+   ```bash
+   pip install k230-flash
+   ```
+   On Linux, add a udev rule first so it doesn't need `sudo`:
+   ```bash
+   echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="29f1", ATTRS{idProduct}=="0230", MODE="0666"' | sudo tee /etc/udev/rules.d/99-k230.rules
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+   On macOS it works out of the box (`brew install libusb` if you hit
+   permission errors). A GUI build (AppImage on Linux) is also on that
+   repo's [Releases](https://github.com/kendryte/k230_flash_py/releases)
+   page if you'd rather not use the CLI.
+
+2) **Open and select the image**:
+
+   **Windows** -- run `K230BurningTool.exe`, click Open, select
+   `nano-mujina-alpha-v2.kdimg`, set Image part name to "all", and set
+   Medium to "SPI NAND".
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_open.png)
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_select.png)
+
+   **Linux / macOS** -- put the device in burn mode first (step 3
+   below), then run:
+   ```bash
+   k230-flash -m SPI_NAND nano-mujina-alpha-v2.kdimg
+   ```
+   `k230-flash --list-devices` confirms it's detected before flashing,
+   if you want to check first.
 
 3) **Put the device in burn mode**: use a double type-A USB cable to
    connect the Nano3s to your PC, hold the recessed button, then power
    the device on while still holding it.
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/nano3s_pin_press.png)
-   The tool's debug box on the right confirms burn mode once it's
-   detected.
+   On Windows, the tool's debug box on the right confirms burn mode
+   once it's detected.
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_debug_box_burn_mode.png)
+   On Linux/macOS, `k230-flash` (run just before this step, or already
+   running and waiting) detects it automatically -- no separate action
+   needed.
 
-4) **Click Start** and wait -- a few minutes, until "Downloading
-   Completed" appears.
+4) **Start the flash and wait**: on Windows, click Start and wait a
+   few minutes until "Downloading Completed" appears.
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_start.png)
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_upgrade_completed.png)
+   On Linux/macOS, `k230-flash` starts writing as soon as it detects
+   the device (step 2 above) and shows its own progress bar -- nothing
+   further to click.
 
 5) **First boot**: the device comes up advertising over Bluetooth
    (look for a name starting `nan3s_` in the official
