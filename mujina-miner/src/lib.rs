@@ -11,6 +11,7 @@ pub mod hw_trait;
 pub mod job_source;
 pub mod mgmt_protocol;
 pub mod peripheral;
+pub mod pool_config;
 pub mod scheduler;
 pub mod stratum_v1;
 #[cfg(test)]

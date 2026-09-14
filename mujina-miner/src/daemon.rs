@@ -110,19 +110,33 @@ impl Daemon {
             }
         });
 
-        // Create job source (Stratum v1 or Dummy)
-        // Controlled by environment variables:
-        // - MUJINA_POOL_URL: Pool address (e.g., stratum+tcp://localhost:3333)
-        // - MUJINA_POOL_USER: Worker username (optional, defaults to "mujina-testing")
-        // - MUJINA_POOL_PASS: Worker password (optional, defaults to "x")
+        // Create job source (Stratum v1 or Dummy).
+        //
+        // Pool address/credentials come from, in order of precedence:
+        // 1. `/data/userconfig/pool.conf`, written by `PATCH /api/v0/pool`
+        //    (see `pool_config.rs`) -- lets a dashboard-saved pool change
+        //    survive across restarts even though the boot script always
+        //    passes the same hardcoded env vars below.
+        // 2. Environment variables, set by the boot script:
+        //    - MUJINA_POOL_URL: Pool address (e.g., stratum+tcp://localhost:3333)
+        //    - MUJINA_POOL_USER: Worker username (optional, defaults to "mujina-testing")
+        //    - MUJINA_POOL_PASS: Worker password (optional, defaults to "x")
         let (source_event_tx, source_event_rx) = mpsc::channel::<SourceEvent>(100);
         let (source_cmd_tx, source_cmd_rx) = mpsc::channel(10);
 
-        if let Ok(pool_url) = env::var("MUJINA_POOL_URL") {
+        let persisted_pool = crate::pool_config::load();
+        let pool_url_opt = persisted_pool.url.clone().or_else(|| env::var("MUJINA_POOL_URL").ok());
+
+        if let Some(pool_url) = pool_url_opt {
             // Use Stratum v1 source
-            let pool_user =
-                env::var("MUJINA_POOL_USER").unwrap_or_else(|_| "mujina-testing".to_string());
-            let pool_pass = env::var("MUJINA_POOL_PASS").unwrap_or_else(|_| "x".to_string());
+            let pool_user = persisted_pool
+                .user
+                .or_else(|| env::var("MUJINA_POOL_USER").ok())
+                .unwrap_or_else(|| "mujina-testing".to_string());
+            let pool_pass = persisted_pool
+                .pass
+                .or_else(|| env::var("MUJINA_POOL_PASS").ok())
+                .unwrap_or_else(|| "x".to_string());
 
             let stratum_config = StratumPoolConfig {
                 url: pool_url.clone(),

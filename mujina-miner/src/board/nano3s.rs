@@ -281,6 +281,33 @@ const POWER_TARGET_SAFETY_W: f64 = 120.0;
 /// just not acted on that often.
 const POWER_TARGET_CHECK_INTERVAL: Duration = Duration::from_secs(150);
 
+/// Temperature-target PLL frequency auto-throttle: given a target chip
+/// temperature (`temp_target_c` local var below, unset = feature off),
+/// steps PLL frequency down when the hottest chip (`temp_max`) reads
+/// above target and back up when comfortably under, recovering only up
+/// to the last dashboard-commanded frequency. Mirrors the vendor's own
+/// stock dashboard's "PLL Temperature-Target Control" (P-controller on
+/// TMax, dead-band, per-tick step, emergency step near the thermal
+/// ceiling -- see NANO3S_DOCS.md SS19/20). Runs on every ~15s STATUS
+/// refresh, same cadence the emergency case needs to react promptly.
+///
+/// Distinct from the Fan Control card's `target_temp_c`
+/// (`PATCH /boards/{name}/fan`): that adjusts fan duty via the C
+/// harness's PID and never touches PLL frequency. This loop is the
+/// reverse -- it never touches the fan, only clock speed -- for when fan
+/// alone can't hold the chain at target.
+const TEMP_TARGET_DEADBAND_C: f64 = 2.0;
+const TEMP_TARGET_STEP_MHZ: i32 = 10;
+/// Immediate step (bypassing the dead-band) once `temp_max` reaches this,
+/// regardless of the configured target -- matches the vendor's own
+/// emergency threshold.
+const TEMP_TARGET_EMERGENCY_C: f64 = 92.0;
+const TEMP_TARGET_EMERGENCY_STEP_MHZ: i32 = 30;
+/// Never throttle below this -- keeps the chain hashing something even
+/// under sustained thermal pressure rather than stepping to a stall.
+/// Matches the frequency floor `patch_board_tuning` already validates.
+const TEMP_TARGET_MIN_MHZ: u32 = 100;
+
 /// Builds the 8 AsicBoost version-rolling candidates for a job's mid_id
 /// slots. `set_vmask()`-equivalent: candidate list is
 /// `[0, full_mask, individual_bit_15, individual_bit_16, ...,
@@ -875,6 +902,35 @@ fn read_fan_status() -> Option<Fan> {
     })
 }
 
+/// Board outlet-air NTC thermistor (Shiheng B57891S0103), wired through
+/// the SoC's own ADC and exposed by the kernel's `ntc-thermistor` driver
+/// as a plain Linux hwmon device -- read directly from sysfs here, no
+/// harness/IPC round-trip needed, since this sensor is entirely on the
+/// Linux side (confirmed via a live `i2cdetect` scan of both i2c buses,
+/// 2026-09-14: only the known INA226/HUSB238A/DC-DC/EEPROM chips are
+/// present, nothing else -- this ADC-based thermistor is the only
+/// discrete external temperature sensor on this board). Named by its
+/// driver ("mf52a104f3950") rather than a hardcoded hwmon index, since
+/// hwmon numbering isn't guaranteed stable across kernel/driver-probe
+/// order. There is no inlet-side sensor on this hardware -- Nano3s is a
+/// single-board design; the vendor's inlet-temp code (`get_inlet_temp()`
+/// in the recovered `mm_miner` source) only exists for larger multi-board
+/// Avalon models this codebase doesn't target.
+fn read_outlet_temp_c() -> Option<f64> {
+    for entry in std::fs::read_dir("/sys/class/hwmon").ok()?.flatten() {
+        let path = entry.path();
+        let Ok(name) = std::fs::read_to_string(path.join("name")) else {
+            continue;
+        };
+        if name.trim() != "mf52a104f3950" {
+            continue;
+        }
+        let raw = std::fs::read_to_string(path.join("temp1_input")).ok()?;
+        return raw.trim().parse::<f64>().ok().map(|millideg| millideg / 1000.0);
+    }
+    None
+}
+
 /// Control file this worker's own loop polls for pause/resume/tune
 /// commands, bypassing the generic scheduler pause API
 /// (`PATCH /api/v0/miner {"paused":true}`).
@@ -882,20 +938,27 @@ const MUJINA_CONTROL_FILE: &str = "/tmp/mujina_control";
 
 /// Writes a `tune:` directive to [`MUJINA_CONTROL_FILE`] for the run loop
 /// to pick up on its next poll (~200ms latency). Encodes frequency,
-/// voltage, and power-target into one line so a single write applies
-/// atomically. Format: `tune:f0,f1,f2,f3,v,pt` -- always exactly 6
-/// comma-separated fields, empty string for any omitted value (e.g.
-/// voltage-only is `tune:,,,,3704,`, frequency-only is
-/// `tune:338,358,378,398,,`). At least one of
-/// `pll_freq_mhz`/`voltage_mv`/`power_target_w` must be `Some`, or this
-/// is a no-op. `power_target_w: None` leaves the power-target loop
-/// untouched (does not disable it).
+/// voltage, power-target, and temp-target into one line so a single write
+/// applies atomically. Format: `tune:f0,f1,f2,f3,v,pt,tt` -- always
+/// exactly 7 comma-separated fields, empty string for any omitted value
+/// (e.g. voltage-only is `tune:,,,,3704,,`, frequency-only is
+/// `tune:338,358,378,398,,,`). At least one of `pll_freq_mhz`/
+/// `voltage_mv`/`power_target_w`/`temp_target_c` must be `Some`, or this
+/// is a no-op. `power_target_w: None`/`temp_target_c: None` leave those
+/// loops untouched (do not disable them) -- use
+/// `write_power_target_command(None)`/`write_temp_target_command(None)`
+/// to explicitly disable.
 pub(crate) fn write_tuning_command(
     pll_freq_mhz: Option<[u32; 4]>,
     voltage_mv: Option<u32>,
     power_target_w: Option<f64>,
+    temp_target_c: Option<f64>,
 ) -> std::io::Result<()> {
-    if pll_freq_mhz.is_none() && voltage_mv.is_none() && power_target_w.is_none() {
+    if pll_freq_mhz.is_none()
+        && voltage_mv.is_none()
+        && power_target_w.is_none()
+        && temp_target_c.is_none()
+    {
         return Ok(());
     }
     let f = pll_freq_mhz;
@@ -906,6 +969,7 @@ pub(crate) fn write_tuning_command(
         f.map(|f| f[3].to_string()).unwrap_or_default(),
         voltage_mv.map(|v| v.to_string()).unwrap_or_default(),
         power_target_w.map(|w| w.to_string()).unwrap_or_default(),
+        temp_target_c.map(|t| t.to_string()).unwrap_or_default(),
     ];
     std::fs::write(MUJINA_CONTROL_FILE, format!("tune:{}", fields.join(",")))
 }
@@ -919,6 +983,20 @@ pub(crate) fn write_power_target_command(target_w: Option<f64>) -> std::io::Resu
     let body = match target_w {
         Some(w) => format!("power_target:{w}"),
         None => "power_target:off".to_string(),
+    };
+    std::fs::write(MUJINA_CONTROL_FILE, body)
+}
+
+/// Live-edits the temperature-target PLL frequency auto-throttle -- see
+/// `TEMP_TARGET_DEADBAND_C`'s doc comment for the full loop design.
+/// `Some(c)` sets a new target in Celsius (measured against `temp_max`,
+/// the hottest chip), taking effect on the next status refresh (~15s);
+/// `None` disables the loop and leaves frequency wherever it last was --
+/// it does not restore the pre-throttle frequency automatically.
+pub(crate) fn write_temp_target_command(target_c: Option<f64>) -> std::io::Result<()> {
+    let body = match target_c {
+        Some(c) => format!("temp_target:{c}"),
+        None => "temp_target:off".to_string(),
     };
     std::fs::write(MUJINA_CONTROL_FILE, body)
 }
@@ -938,6 +1016,43 @@ pub(crate) fn write_pause_command(pause: bool) -> std::io::Result<()> {
 /// harness side, never `power_en_set()`/`harness_apply_idle()`.
 pub(crate) fn write_fan_control_command(cmd: &str) -> std::io::Result<()> {
     std::fs::write(HARNESS_CONTROL_FILE, cmd)
+}
+
+/// Path the C harness persists the fan curve to (`fan_curve_save()` in
+/// `mujina_test_harness.c`) -- sole writer is the harness itself, not
+/// this process; [`read_fan_curve`] only reads it back for display.
+const FAN_CURVE_CONF_PATH: &str = "/data/userconfig/fan_curve.conf";
+
+/// Writes a `fancurve:t1:d1,t2:d2,...` directive to `HARNESS_CONTROL_FILE`.
+/// The harness validates, sorts by temp, applies live, and persists to
+/// [`FAN_CURVE_CONF_PATH`] -- this function itself does no validation
+/// beyond formatting; range/count checks happen in the API handler.
+pub(crate) fn write_fan_curve_command(points: &[(f64, f64)]) -> std::io::Result<()> {
+    let body = points
+        .iter()
+        .map(|(t, d)| format!("{t}:{d}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    std::fs::write(HARNESS_CONTROL_FILE, format!("fancurve:{body}"))
+}
+
+/// Reads the currently persisted fan curve directly from
+/// [`FAN_CURVE_CONF_PATH`] -- the same file the harness writes, so this
+/// always reflects the harness's actual live-applied curve, not a
+/// separately-tracked copy. Empty if the harness hasn't run yet (it seeds
+/// this file with its own built-in default on first startup, so in
+/// practice it's only ever empty before the harness's very first boot).
+pub(crate) fn read_fan_curve() -> Vec<(f64, f64)> {
+    let Ok(contents) = std::fs::read_to_string(FAN_CURVE_CONF_PATH) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| {
+            let (t, d) = line.split_once(',')?;
+            Some((t.trim().parse::<f64>().ok()?, d.trim().parse::<f64>().ok()?))
+        })
+        .collect()
 }
 
 /// Returns Some("pause"/"resume"/"tune:..."/...) and clears the file, or
@@ -1507,6 +1622,15 @@ fn run_worker(
     // startup ramp target) and reapply both after every resume.
     let mut last_applied_pll_freq: [u32; 4] = NANO3S_PLL_FREQ_TARGET;
     let mut last_applied_voltage_mv: Option<i32> = None;
+    // Temp-target PLL throttle -- see TEMP_TARGET_DEADBAND_C's doc comment.
+    // `None` means the feature is off (no automatic frequency changes).
+    let mut temp_target_c: Option<f64> = None;
+    // The ceiling the throttle recovers back up to -- the last frequency
+    // actually *commanded* (dashboard/API `tune:`, not the throttle's own
+    // steps), so throttling down and back up never overshoots what the
+    // user asked for. Updated only in the `tune:` match arm below,
+    // deliberately never by the throttle block itself.
+    let mut temp_throttle_base_freq: [u32; 4] = NANO3S_PLL_FREQ_TARGET;
 
     loop {
         // Poll for an external pause/resume via MUJINA_CONTROL_FILE,
@@ -1543,10 +1667,10 @@ fn run_worker(
             }
             Some(s) if s.starts_with("tune:") => {
                 // See write_tuning_command()'s doc comment for the exact
-                // "always 6 fields" wire format this expects.
+                // "always 7 fields" wire format this expects.
                 let fields: Vec<&str> = s["tune:".len()..].split(',').collect();
-                if fields.len() != 6 {
-                    eprintln!("[nano3s] malformed tune directive (want 6 fields): {s}");
+                if fields.len() != 7 {
+                    eprintln!("[nano3s] malformed tune directive (want 7 fields): {s}");
                 } else {
                     if !fields[0].is_empty() {
                         match fields[0..4].iter().map(|f| f.parse::<u32>()).collect::<Result<Vec<u32>, _>>() {
@@ -1556,6 +1680,11 @@ fn run_worker(
                                     eprintln!("[nano3s] tuning: nano3s_ipc_set_mode failed");
                                 } else {
                                     last_applied_pll_freq = [freq[0], freq[1], freq[2], freq[3]];
+                                    // A dashboard/API-commanded frequency
+                                    // is the new ceiling the temp-target
+                                    // throttle recovers back up to -- see
+                                    // temp_throttle_base_freq's doc comment.
+                                    temp_throttle_base_freq = last_applied_pll_freq;
                                     eprintln!("[nano3s] tuning: SET_MODE pll_freq={freq:?} (via dashboard/API)");
                                 }
                             }
@@ -1586,6 +1715,15 @@ fn run_worker(
                             Err(_) => eprintln!("[nano3s] malformed tune power-target field: {s}"),
                         }
                     }
+                    if !fields[6].is_empty() {
+                        match fields[6].parse::<f64>() {
+                            Ok(c) => {
+                                temp_target_c = Some(c);
+                                eprintln!("[nano3s] tuning: temp-target set to {c:.1}C (via dashboard/API)");
+                            }
+                            Err(_) => eprintln!("[nano3s] malformed tune temp-target field: {s}"),
+                        }
+                    }
                 }
             }
             Some(s) if s.starts_with("power_target:") => {
@@ -1603,6 +1741,21 @@ fn run_worker(
                             eprintln!("[nano3s] power-target: live target set to {w:.1}W via dashboard/API");
                         }
                         Err(_) => eprintln!("[nano3s] malformed power_target directive: {s}"),
+                    }
+                }
+            }
+            Some(s) if s.starts_with("temp_target:") => {
+                let v = &s["temp_target:".len()..];
+                if v == "off" {
+                    temp_target_c = None;
+                    eprintln!("[nano3s] temp-target: disabled via dashboard/API");
+                } else {
+                    match v.parse::<f64>() {
+                        Ok(c) => {
+                            temp_target_c = Some(c);
+                            eprintln!("[nano3s] temp-target: live target set to {c:.1}C via dashboard/API");
+                        }
+                        Err(_) => eprintln!("[nano3s] malformed temp_target directive: {s}"),
                     }
                 }
             }
@@ -1760,11 +1913,58 @@ fn run_worker(
                         eprintln!(
                             "[nano3s] power-target: power={power_w:.1}W target={target_w:.1}W cur={cur_mv}mV -> {new_mv}mV"
                         );
-                        if let Err(e) = write_tuning_command(None, Some(new_mv as u32), None) {
+                        if let Err(e) = write_tuning_command(None, Some(new_mv as u32), None, None) {
                             eprintln!("[nano3s] power-target: failed to write tuning command: {e}");
                         }
                     }
                     next_power_check = now + POWER_TARGET_CHECK_INTERVAL;
+                }
+            }
+
+            // Temp-target PLL frequency auto-throttle -- see
+            // TEMP_TARGET_DEADBAND_C's doc comment. Calls
+            // nano3s_ipc_set_mode() directly (like the `tune:` arm does)
+            // rather than going through write_tuning_command()'s
+            // control-file round-trip: this runs in the same loop/process
+            // that would read that file back, so the round-trip buys
+            // nothing and would only add a tick of lag. Deliberately does
+            // NOT update temp_throttle_base_freq -- only a
+            // dashboard/API-commanded frequency (the `tune:` arm above)
+            // moves that ceiling.
+            if let Some(target_c) = temp_target_c {
+                let temp_max = st.temp_max as f64;
+                if temp_max > 0.0 {
+                    let step_mhz = if temp_max >= TEMP_TARGET_EMERGENCY_C {
+                        // Hard safety trip -- always allowed, ignores the
+                        // dead-band.
+                        Some(-TEMP_TARGET_EMERGENCY_STEP_MHZ)
+                    } else if temp_max > target_c + TEMP_TARGET_DEADBAND_C {
+                        Some(-TEMP_TARGET_STEP_MHZ)
+                    } else if temp_max < target_c - TEMP_TARGET_DEADBAND_C {
+                        Some(TEMP_TARGET_STEP_MHZ)
+                    } else {
+                        None
+                    };
+
+                    if let Some(step_mhz) = step_mhz {
+                        let mut new_freq = last_applied_pll_freq;
+                        for i in 0..4 {
+                            let candidate = new_freq[i] as i32 + step_mhz;
+                            let ceiling = temp_throttle_base_freq[i] as i32;
+                            new_freq[i] = candidate.clamp(TEMP_TARGET_MIN_MHZ as i32, ceiling) as u32;
+                        }
+                        if new_freq != last_applied_pll_freq {
+                            eprintln!(
+                                "[nano3s] temp-target: temp_max={temp_max:.1}C target={target_c:.1}C freq={last_applied_pll_freq:?} -> {new_freq:?}"
+                            );
+                            let rc = unsafe { nano3s_ipc_set_mode(new_freq.as_ptr(), 0) };
+                            if rc != 0 {
+                                eprintln!("[nano3s] temp-target: nano3s_ipc_set_mode failed");
+                            } else {
+                                last_applied_pll_freq = new_freq;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1777,14 +1977,21 @@ fn run_worker(
                     hashrate: (st.ghsmm as u64).saturating_mul(1_000_000_000),
                     is_active: current_task.is_some() && st.paused == 0,
                 }];
-                t.temperatures = vec![TemperatureSensor {
-                    name: "asic".into(),
-                    temperature: if st.temp_avg > 0.0 {
-                        Some(Temperature::from_celsius(st.temp_avg))
-                    } else {
-                        None
+                t.temperatures = vec![
+                    TemperatureSensor {
+                        name: "asic".into(),
+                        temperature: if st.temp_avg > 0.0 {
+                            Some(Temperature::from_celsius(st.temp_avg))
+                        } else {
+                            None
+                        },
                     },
-                }];
+                    TemperatureSensor {
+                        name: "outlet".into(),
+                        temperature: read_outlet_temp_c()
+                            .map(|c| Temperature::from_celsius(c as f32)),
+                    },
+                ];
                 t.powers = vec![PowerMeasurement {
                     name: "core".into(),
                     voltage_v: Some(st.voltage_mv as f32 / 1000.0),

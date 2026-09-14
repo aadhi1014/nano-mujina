@@ -17,7 +17,9 @@ use super::commands::SchedulerCommand;
 use super::server::SharedState;
 use crate::api_client::types::{
     BoardFanRequest, BoardLedRequest, BoardLedState, BoardPauseRequest, BoardPowerTargetRequest,
-    BoardTelemetry, BoardTuningRequest, MinerPatchRequest, MinerTelemetry, SourceTelemetry,
+    BoardTelemetry, BoardTempTargetRequest, BoardTuningRequest, FanCurvePoint, FanCurveRequest,
+    FanCurveResponse, MinerPatchRequest, MinerTelemetry, PoolConfigRequest, PoolConfigResponse,
+    SourceTelemetry,
 };
 
 /// Build the v0 API routes with OpenAPI metadata.
@@ -29,10 +31,13 @@ pub fn routes() -> OpenApiRouter<SharedState> {
         .routes(routes!(get_board))
         .routes(routes!(patch_board_tuning))
         .routes(routes!(patch_board_power_target))
+        .routes(routes!(patch_board_temp_target))
         .routes(routes!(patch_board_fan))
+        .routes(routes!(get_board_fan_curve, patch_board_fan_curve))
         .routes(routes!(patch_board_pause))
         .routes(routes!(get_board_led, patch_board_led))
         .routes(routes!(post_reboot))
+        .routes(routes!(get_pool, patch_pool))
         .routes(routes!(get_sources))
         .routes(routes!(get_source))
 }
@@ -151,8 +156,8 @@ async fn get_board(
 ///
 /// Only implemented for the nano3s board driver (builds without the
 /// `nano3s` Cargo feature return 501). At least one of `pll_freq_mhz`/
-/// `voltage_mv`/`power_target_w` must be set; values are range-checked
-/// before being applied.
+/// `voltage_mv`/`power_target_w`/`temp_target_c` must be set; values are
+/// range-checked before being applied.
 #[utoipa::path(
     patch,
     path = "/boards/{name}/tuning",
@@ -184,7 +189,11 @@ async fn patch_board_tuning(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    if req.pll_freq_mhz.is_none() && req.voltage_mv.is_none() && req.power_target_w.is_none() {
+    if req.pll_freq_mhz.is_none()
+        && req.voltage_mv.is_none()
+        && req.power_target_w.is_none()
+        && req.temp_target_c.is_none()
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
     // Frequency range check; the four PLL ramp domains must be non-decreasing.
@@ -207,11 +216,22 @@ async fn patch_board_tuning(
     {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // Same range check as the dedicated temp-target endpoint.
+    if let Some(c) = req.temp_target_c
+        && !(30.0..=95.0).contains(&c)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     #[cfg(feature = "nano3s")]
     {
-        crate::board::nano3s::write_tuning_command(req.pll_freq_mhz, req.voltage_mv, req.power_target_w)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        crate::board::nano3s::write_tuning_command(
+            req.pll_freq_mhz,
+            req.voltage_mv,
+            req.power_target_w,
+            req.temp_target_c,
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(StatusCode::OK)
     }
     #[cfg(not(feature = "nano3s"))]
@@ -272,6 +292,66 @@ async fn patch_board_power_target(
     }
 }
 
+/// Live-edit the temp-target PLL frequency auto-throttle's target, no
+/// reboot required.
+///
+/// `target_c: null`/absent disables the loop (frequency stays wherever it
+/// last was, no automatic recovery); a present value takes effect on the
+/// loop's next status refresh (~15s). Steps frequency down when the
+/// hottest chip (`temp_max`) exceeds target and back up when comfortably
+/// under, recovering only up to the last dashboard/API-commanded
+/// frequency. Distinct from `PATCH /boards/{name}/fan`'s
+/// `target_temp_c`, which drives fan duty instead and never touches
+/// frequency.
+#[utoipa::path(
+    patch,
+    path = "/boards/{name}/temp-target",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    request_body = BoardTempTargetRequest,
+    responses(
+        (status = OK, description = "Temp target updated (or cleared)"),
+        (status = BAD_REQUEST, description = "target_c outside the allowed range"),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support the temp-target loop"),
+    ),
+)]
+async fn patch_board_temp_target(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Json(req): Json<BoardTempTargetRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Range check before the value reaches the temp-target loop.
+    if let Some(c) = req.target_c
+        && !(30.0..=95.0).contains(&c)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        crate::board::nano3s::write_temp_target_command(req.target_c)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(StatusCode::OK)
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
 /// Live-edit fan control, no reboot required.
 ///
 /// Fan commands never touch `power_en`, so they can be sent at any time
@@ -306,22 +386,15 @@ async fn patch_board_fan(
     if !known {
         return Err(StatusCode::NOT_FOUND);
     }
-    if req.mode.is_none() && req.manual_duty_percent.is_none() && req.target_temp_c.is_none() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    if let Some(t) = req.target_temp_c
-        && !(30.0..=95.0).contains(&t)
-    {
+    if req.mode.is_none() && req.manual_duty_percent.is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     #[cfg(feature = "nano3s")]
     {
-        // Single combined write: the harness polls HARNESS_CONTROL_FILE
-        // once/second and each write replaces the file's whole contents, so
-        // separate writes would race. Always exactly 3 comma-separated
-        // fields (mode, duty, target_temp_c); empty means "don't change".
-        // Parsed by mujina_test_harness.c's control_poll_loop().
+        // Always exactly 2 comma-separated fields (mode, duty); empty
+        // means "don't change". Parsed by mujina_test_harness.c's
+        // control_poll_loop().
         let pct = match req.mode.as_deref() {
             Some("manual") => Some(req.manual_duty_percent.ok_or(StatusCode::BAD_REQUEST)?),
             Some("auto") => None,
@@ -334,11 +407,114 @@ async fn patch_board_fan(
         let fields = [
             req.mode.clone().unwrap_or_default(),
             pct.map(|p| p.to_string()).unwrap_or_default(),
-            req.target_temp_c.map(|t| t.to_string()).unwrap_or_default(),
         ];
         crate::board::nano3s::write_fan_control_command(&format!("fan:{}", fields.join(",")))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(StatusCode::OK)
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Return the currently persisted/applied fan curve.
+#[utoipa::path(
+    get,
+    path = "/boards/{name}/fan-curve",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    responses(
+        (status = OK, description = "Current fan curve points, sorted ascending by temp_c", body = FanCurveResponse),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support a fan curve"),
+    ),
+)]
+async fn get_board_fan_curve(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<FanCurveResponse>, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        let points = crate::board::nano3s::read_fan_curve()
+            .into_iter()
+            .map(|(temp_c, duty_pct)| FanCurvePoint { temp_c, duty_pct })
+            .collect();
+        Ok(Json(FanCurveResponse { points }))
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Set the fan's outlet-temp baseline curve, no reboot required.
+///
+/// 2-8 points, any order (sorted by `temp_c` before being applied). This
+/// is only the baseline -- it's overridden by 100% whenever the hottest
+/// chip crosses the active mode's real tuning limit
+/// (`PATCH /boards/{name}/temp-target`'s design), independent of outlet
+/// temp. Applied live within ~1s and persisted across reboots.
+#[utoipa::path(
+    patch,
+    path = "/boards/{name}/fan-curve",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    request_body = FanCurveRequest,
+    responses(
+        (status = OK, description = "Fan curve updated", body = FanCurveResponse),
+        (status = BAD_REQUEST, description = "Fewer than 2 or more than 8 points, or a point outside the allowed range"),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support a fan curve"),
+    ),
+)]
+async fn patch_board_fan_curve(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Json(req): Json<FanCurveRequest>,
+) -> Result<Json<FanCurveResponse>, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if req.points.len() < 2 || req.points.len() > 8 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    for p in &req.points {
+        if !(0.0..=150.0).contains(&p.temp_c) || !(0.0..=100.0).contains(&p.duty_pct) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        let points: Vec<(f64, f64)> = req.points.iter().map(|p| (p.temp_c, p.duty_pct)).collect();
+        crate::board::nano3s::write_fan_curve_command(&points)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut sorted = req.points;
+        sorted.sort_by(|a, b| a.temp_c.total_cmp(&b.temp_c));
+        Ok(Json(FanCurveResponse { points: sorted }))
     }
     #[cfg(not(feature = "nano3s"))]
     {
@@ -501,6 +677,68 @@ async fn post_reboot() -> StatusCode {
         let _ = std::process::Command::new("reboot").status();
     });
     StatusCode::OK
+}
+
+/// Return the currently persisted pool configuration.
+///
+/// This is what will apply on the miner's *next* restart, not necessarily
+/// what the running process connected with at its own last startup -- see
+/// `GET /api/v0/sources` for the live connection's actual URL.
+#[utoipa::path(
+    get,
+    path = "/pool",
+    tag = "miner",
+    responses(
+        (status = OK, description = "Currently persisted pool config", body = PoolConfigResponse),
+    ),
+)]
+async fn get_pool() -> Json<PoolConfigResponse> {
+    let cfg = crate::pool_config::load();
+    Json(PoolConfigResponse {
+        url: cfg.url,
+        user: cfg.user,
+        password_set: cfg.pass.is_some(),
+    })
+}
+
+/// Update the persisted pool configuration.
+///
+/// Saved to `/data/userconfig/pool.conf` immediately; takes effect on the
+/// miner's next startup since the stratum client has no hot-reload path.
+/// Applying it requires a full device reboot (`POST /api/v0/reboot`), not
+/// just restarting the `mujina-minerd` process -- killing and relaunching
+/// the process in place leaves the RT-Smart core's IPC handle stale
+/// (hashrate stuck at 0 even though the API looks healthy), so this API
+/// deliberately does not offer a lighter process-only restart.
+#[utoipa::path(
+    patch,
+    path = "/pool",
+    tag = "miner",
+    request_body = PoolConfigRequest,
+    responses(
+        (status = OK, description = "Pool config saved", body = PoolConfigResponse),
+        (status = BAD_REQUEST, description = "No fields set, or url isn't a stratum+tcp://\
+            or stratum+ssl:// URL"),
+        (status = INTERNAL_SERVER_ERROR, description = "Failed to write the config file"),
+    ),
+)]
+async fn patch_pool(Json(req): Json<PoolConfigRequest>) -> Result<Json<PoolConfigResponse>, StatusCode> {
+    if req.url.is_none() && req.user.is_none() && req.password.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if let Some(url) = &req.url
+        && !(url.starts_with("stratum+tcp://") || url.starts_with("stratum+ssl://"))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let cfg = crate::pool_config::save_merged(req.url.as_deref(), req.user.as_deref(), req.password.as_deref())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(PoolConfigResponse {
+        url: cfg.url,
+        user: cfg.user,
+        password_set: cfg.pass.is_some(),
+    }))
 }
 
 /// Return all registered job sources.

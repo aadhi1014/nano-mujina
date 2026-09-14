@@ -27,6 +27,10 @@ const INFO_HTML: &str = include_str!("../../assets/info.html");
 /// separate from `/dashboard` since it's a standing control surface, not
 /// a telemetry view.
 const LED_HTML: &str = include_str!("../../assets/led.html");
+/// Pool configuration page (Stratum URL/worker/password), separate from
+/// `/dashboard` for the same reason `/led` is -- a standing config surface
+/// rather than a telemetry view.
+const POOL_HTML: &str = include_str!("../../assets/pool.html");
 /// Header brandmark -- mujina-head-mark.svg from rkuester's
 /// mujina-logo-set (github.com/rkuester/mujina-logo-set), used with the
 /// author's permission. Served from its own route rather than inlined
@@ -82,6 +86,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/data", routing::get(serve_data))
         .route("/info", routing::get(serve_info_page))
         .route("/led", routing::get(serve_led_page))
+        .route("/pool", routing::get(serve_pool_page))
         .route("/nano3s-detail", routing::get(serve_nano3s_detail))
         .route("/mujina-head-mark.svg", routing::get(serve_logo_svg))
         .route("/doom/launch", routing::post(launch_doom))
@@ -130,6 +135,10 @@ async fn serve_info_page() -> impl IntoResponse {
 
 async fn serve_led_page() -> impl IntoResponse {
     Html(LED_HTML)
+}
+
+async fn serve_pool_page() -> impl IntoResponse {
+    Html(POOL_HTML)
 }
 
 /// Per-chip and chain-wide detail from the latest `IPC_MSG_STATUS`.
@@ -210,6 +219,7 @@ async fn serve_data(
             "avg_freq_mhz": avg_field(&boards, "freq_mhz"),
             "avg_core_v": avg_field(&boards, "core_v"),
             "avg_asic_c": avg_field(&boards, "asic_c"),
+            "avg_outlet_c": avg_field(&boards, "outlet_c"),
             "avg_fan_rpm": avg_fan_rpm,
             "series": fleet_series,
         },
@@ -267,6 +277,16 @@ fn board_json(b: &BoardTelemetry, series: Vec<f64>) -> Value {
         .find(|t| t.name == "asic")
         .and_then(|t| t.temperature)
         .map(|t| t.as_degrees_c() as f64);
+    // External board NTC thermistor, positioned near the exhaust -- not
+    // an ASIC-chain reading. No inlet-side sensor exists on this hardware
+    // (confirmed via a live i2c scan and the recovered vendor source,
+    // 2026-09-14), so there is no corresponding "inlet_c" field.
+    let outlet_c = b
+        .temperatures
+        .iter()
+        .find(|t| t.name == "outlet")
+        .and_then(|t| t.temperature)
+        .map(|t| t.as_degrees_c() as f64);
 
     // Per-chip fields, commanded PLL frequency, and the USB-C PD input rail
     // don't exist on the generic BoardTelemetry -- pulled from the
@@ -322,6 +342,7 @@ fn board_json(b: &BoardTelemetry, series: Vec<f64>) -> Value {
             None
         },
         "asic_c": asic_c,
+        "outlet_c": outlet_c,
         "fail_rate_pct": fail_rate_pct,
         "best_share_diff": best_share_diff,
         "chips": chips,

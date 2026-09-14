@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUJINA // POOL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cyan: #00f0ff;
+    --mag: #ff2e97;
+    --lime: #c8ff00;
+    --amber: #ffb000;
+    --green: #1bff9c;
+    --red: #ff3860;
+    --purple: #b967ff;
+    --bg: #05060c;
+    --panel: #0a0f1c;
+    --panel2: #0d1424;
+    --line: #14243a;
+    --dim: #4a6a86;
+    --ink: #d6f7ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Share Tech Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 24px 20px 60px; }
+  .top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 20px;
+    flex-wrap: wrap; gap: 10px;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-weight: 900; margin: 0;
+    font-size: 22px; letter-spacing: .16em; text-transform: uppercase;
+  }
+  h1 .chev { color: var(--cyan); text-shadow: 0 0 8px rgba(0,240,255,.5); }
+  .nav a {
+    color: var(--dim); text-decoration: none; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; margin-left: 18px;
+    border-bottom: 1px solid transparent; padding-bottom: 3px;
+  }
+  .nav a:hover, .nav a.active { color: var(--cyan); border-color: var(--cyan); }
+  .status-strip {
+    display: flex; gap: 8px; align-items: center; font-size: 12px;
+    color: var(--dim); letter-spacing: .05em;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+  .sec { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 12px;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--dim);
+    margin: 28px 0 12px; display: flex; align-items: center; gap: 10px; }
+  .sec:first-of-type { margin-top: 0; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+  .sec-sub { font-family: 'Share Tech Mono', monospace; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--dim); flex: none; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); padding: 18px; }
+  .row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+  .row:last-of-type { margin-bottom: 0; }
+  .row label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  .row label small { text-transform: none; letter-spacing: 0; }
+  .row input[type=text], .row input[type=password] {
+    background: var(--panel2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 4px; padding: 10px 12px; font: inherit; font-size: 13px;
+  }
+  .row input:focus { outline: none; border-color: var(--cyan); }
+
+  .btn {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--ink);
+    padding: 11px 18px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer;
+    border-radius: 4px; transition: all .12s;
+  }
+  .btn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .btn.pri { border-color: var(--cyan); color: var(--cyan); background: rgba(0,240,255,.08); }
+  .btn.pri:hover { background: rgba(0,240,255,.16); box-shadow: 0 0 12px rgba(0,240,255,.25); }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: rgba(255,56,96,.1); box-shadow: 0 0 12px rgba(255,56,96,.25); }
+
+  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+  .msg { margin-top: 12px; font-size: 12px; color: var(--dim); }
+  .msg.ok { color: var(--green); }
+  .msg.err { color: var(--red); }
+  .hint { font-size: 12px; color: var(--dim); margin: 0 0 14px; line-height: 1.5; }
+
+  .badge { display: inline-block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 3px; border: 1px solid var(--amber); color: var(--amber); }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; font-size: 12px; margin: 0; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; color: var(--ink); word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1><span class="chev">//</span>MUJINA <span style="color:var(--dim);font-weight:400">/ POOL</span></h1>
+    <div style="display:flex;align-items:center;gap:18px">
+      <div class="status-strip"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+      <nav class="nav">
+        <a href="/dashboard">Dashboard</a>
+        <a href="/info">Info</a>
+        <a href="/led">LED</a>
+        <a href="/pool" class="active">Pool</a>
+      </nav>
+    </div>
+  </div>
+
+  <div class="sec">Active Connection<span class="sec-sub">what the running daemon connected with at its last startup</span></div>
+  <div class="card">
+    <dl class="kv">
+      <dt>Source</dt><dd id="activeName">—</dd>
+      <dt>URL</dt><dd id="activeUrl">—</dd>
+      <dt>Difficulty</dt><dd id="activeDiff">—</dd>
+    </dl>
+  </div>
+
+  <div class="sec">Pool Configuration<span class="sec-sub">saved immediately, applied on next restart</span></div>
+  <div class="card">
+    <div class="row">
+      <label for="poolUrl">Pool URL</label>
+      <input type="text" id="poolUrl" placeholder="stratum+tcp://pool.example.com:3333" autocomplete="off">
+    </div>
+    <div class="row">
+      <label for="poolUser">Worker <small>(usually address.workername)</small></label>
+      <input type="text" id="poolUser" placeholder="bc1q....worker1" autocomplete="off">
+    </div>
+    <div class="row">
+      <label for="poolPass">Password <small>(leave blank to keep current; most pools ignore this)</small></label>
+      <input type="password" id="poolPass" placeholder="unchanged" autocomplete="new-password">
+    </div>
+    <div class="actions">
+      <button class="btn pri" id="poolSave">Save</button>
+      <span class="badge" id="restartBadge" style="display:none">reboot required to apply</span>
+    </div>
+    <div class="msg" id="poolMsg"></div>
+  </div>
+
+  <div class="sec">Apply Changes</div>
+  <div class="card">
+    <p class="hint">The stratum connection is only read at startup — saving new pool settings above does not reconnect the running miner by itself. Applying a change needs a full device reboot (not just a process restart — the ASIC core's IPC link goes stale otherwise). Mining stops for a couple of minutes while it comes back up.</p>
+    <button class="btn danger" id="restartBtn">Reboot Device to Apply</button>
+    <div class="msg" id="restartMsg"></div>
+  </div>
+</div>
+
+<script>
+function $(id) { return document.getElementById(id); }
+
+async function loadActive() {
+  try {
+    const r = await fetch('/api/v0/sources');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const sources = await r.json();
+    const s = sources[0];
+    $('connDot').className = 'dot ok';
+    $('connText').textContent = 'live';
+    $('activeName').textContent = s ? s.name : '—';
+    $('activeUrl').textContent = (s && s.url) ? s.url : '—';
+    $('activeDiff').textContent = (s && s.difficulty != null) ? s.difficulty : '—';
+  } catch (e) {
+    $('connDot').className = 'dot bad';
+    $('connText').textContent = 'fetch failed: ' + e;
+  }
+}
+
+async function loadPool() {
+  try {
+    const r = await fetch('/api/v0/pool');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    $('poolUrl').value = d.url || '';
+    $('poolUser').value = d.user || '';
+    $('poolPass').placeholder = d.password_set ? 'unchanged (set)' : 'unchanged (none set)';
+  } catch (e) {
+    $('poolMsg').textContent = 'failed to load current config: ' + e;
+    $('poolMsg').className = 'msg err';
+  }
+}
+
+async function savePool() {
+  const body = {};
+  const url = $('poolUrl').value.trim();
+  const user = $('poolUser').value.trim();
+  const pass = $('poolPass').value;
+  if (url) body.url = url;
+  if (user) body.user = user;
+  if (pass) body.password = pass;
+  if (!Object.keys(body).length) {
+    $('poolMsg').textContent = 'nothing to save';
+    $('poolMsg').className = 'msg';
+    return;
+  }
+  $('poolMsg').textContent = 'saving…'; $('poolMsg').className = 'msg';
+  try {
+    const r = await fetch('/api/v0/pool', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const detail = await r.text();
+      $('poolMsg').textContent = `save failed (${r.status}): ${detail || 'rejected'}`;
+      $('poolMsg').className = 'msg err';
+      return;
+    }
+    $('poolMsg').textContent = 'saved ✓ — reboot the device to apply';
+    $('poolMsg').className = 'msg ok';
+    $('restartBadge').style.display = '';
+    $('poolPass').value = '';
+    loadPool();
+  } catch (e) { $('poolMsg').textContent = 'failed: ' + e; $('poolMsg').className = 'msg err'; }
+}
+
+async function rebootDevice() {
+  if (!confirm('Reboot the device now? Mining will stop for a couple of minutes while it comes back up.')) return;
+  $('restartMsg').textContent = 'rebooting…'; $('restartMsg').className = 'msg';
+  try {
+    const r = await fetch('/api/v0/reboot', { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    $('restartMsg').textContent = 'reboot requested ✓ — back online in a couple of minutes';
+    $('restartMsg').className = 'msg ok';
+    $('restartBadge').style.display = 'none';
+  } catch (e) {
+    $('restartMsg').textContent = 'failed: ' + e;
+    $('restartMsg').className = 'msg err';
+  }
+}
+
+$('poolSave').addEventListener('click', savePool);
+$('restartBtn').addEventListener('click', rebootDevice);
+
+loadActive();
+loadPool();
+setInterval(loadActive, 5000);
+</script>
+</body>
+</html>

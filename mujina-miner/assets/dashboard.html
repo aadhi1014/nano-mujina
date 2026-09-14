@@ -421,6 +421,7 @@
       <span class="atpill" id="atpill">◉ <span id="atpilltxt">auto-tuning</span></span>
       <a class="navlink" href="/info">Info</a>
       <a class="navlink" href="/led">LED</a>
+      <a class="navlink" href="/pool">Pool</a>
       <button class="gear" id="gear" title="Settings">⚙</button>
     </div>
   </div>
@@ -472,6 +473,10 @@
       <label for="tunePowerTarget">Power Target <small style="color:var(--dim)">W (power-target loop, blank = leave unchanged)</small></label>
       <input type="number" id="tunePowerTarget" min="20" max="130" step="0.1" value="95">
     </div>
+    <div class="row">
+      <label for="tuneTempTarget">Temp Target <small style="color:var(--dim)">°C (PLL auto-throttle, blank = leave unchanged — steps frequency down if the hottest chip runs over)</small></label>
+      <input type="number" id="tuneTempTarget" min="30" max="95" step="1" value="85">
+    </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:4px">
       <button class="btn pri" id="tuneApply">Apply Mode</button>
     </div>
@@ -479,23 +484,39 @@
   </div>
 
   <!-- Fan Control -->
-  <div class="sec">Fan Control<span class="sec-sub">Real duty-based control on pwmchip0/pwm3 — auto mode drives duty from chip temp vs. the active mode's real thermal limit</span></div>
+  <div class="sec">Fan Control<span class="sec-sub">Real duty-based control on pwmchip0/pwm3 — auto mode runs the fan curve below, escalating to 100% if any chip crosses the active mode's tuning limit</span></div>
   <div class="card" style="max-width:560px">
     <div class="row">
       <label for="fanMode">Mode</label>
       <select id="fanMode" style="background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit">
-        <option value="auto" selected>Auto (temperature-driven)</option>
+        <option value="auto" selected>Auto (curve + chip-limit escalation)</option>
         <option value="manual">Manual</option>
       </select>
     </div>
     <div class="row" id="fanManualRow" style="display:none">
-      <label for="fanDuty">Fan Duty <small style="color:var(--dim)">% (floor is 25% — hardware safety minimum, lower values are clamped up)</small></label>
+      <label for="fanDuty">Fan Duty <small style="color:var(--dim)">% (0-100, no floor)</small></label>
       <input type="number" id="fanDuty" min="0" max="100" step="1" value="50">
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:4px">
       <button class="btn pri" id="fanApply">Apply</button>
     </div>
     <div class="msg" id="fanMsg"></div>
+  </div>
+
+  <!-- Fan Curve -->
+  <div class="sec">Fan Curve<span class="sec-sub">Outlet-temp → duty% baseline, used in Auto mode — saved immediately, applied within ~1s</span></div>
+  <div class="card" style="max-width:560px">
+    <svg id="curvePreview" viewBox="0 0 300 120" style="width:100%;height:120px;display:block;margin-bottom:10px;background:var(--panel2);border:1px solid var(--line);border-radius:6px">
+      <g id="curveGrid" stroke="var(--line)" stroke-width="1"></g>
+      <polyline id="curveLine" fill="none" stroke="var(--cyan)" stroke-width="2"></polyline>
+      <g id="curveDots" fill="var(--cyan)"></g>
+    </svg>
+    <div id="curvePoints"></div>
+    <div style="display:flex;gap:10px;justify-content:space-between;margin-top:10px">
+      <button class="btn" id="curveAddPoint">+ Add Point</button>
+      <button class="btn pri" id="curveApply">Save Curve</button>
+    </div>
+    <div class="msg" id="curveMsg"></div>
   </div>
 
   <!-- Per-Chip Temperature Block Map -->
@@ -674,6 +695,7 @@
     <div class="card temp span2">
       <div class="dual">
         <div class="dcell"><div class="label">Avg ASIC Temp</div><div class="val" id="fasic">—</div></div>
+        <div class="dcell"><div class="label">Outlet Temp</div><div class="val" id="foutlet">—</div></div>
         <div class="dcell"><div class="label">Avg Fail Rate</div><div class="val" id="fvr">—</div></div>
       </div>
     </div>
@@ -732,6 +754,7 @@
     <div class="card temp span2">
       <div class="dual">
         <div class="dcell"><div class="label">ASIC Temp</div><div class="val" id="asic">—</div></div>
+        <div class="dcell"><div class="label">Outlet Temp</div><div class="val" id="outlet" title="External board NTC thermistor, positioned near the exhaust -- not on the ASIC chain itself. No inlet sensor exists on this hardware.">—</div></div>
         <div class="dcell"><div class="label">Fail Rate</div><div class="val" id="vr">—</div></div>
       </div>
     </div>
@@ -1250,6 +1273,7 @@ function renderFleet(d) {
   $('ffreq').innerHTML = (f.avg_freq_mhz != null) ? (+f.avg_freq_mhz).toFixed(0) + ' <small>MHz</small>' : '<span class="na">n/a</span>';
   $('fcorev').innerHTML = fx(f.avg_core_v, 'V', 3);
   $('fasic').innerHTML = fx(f.avg_asic_c, '°C', 1);
+  $('foutlet').innerHTML = fx(f.avg_outlet_c, '°C', 1);
   $('fvr').innerHTML = fx(f.avg_fail_rate_pct, '%', 2);
   $('feff').innerHTML = fx(f.efficiency_jth, 'J/TH', 2);
   $('fboards').textContent = f.boards_online;
@@ -1308,6 +1332,7 @@ function renderBoard(b) {
   $('inputv').innerHTML = fx(b.input_v, 'V', 2);
   $('eff').innerHTML = fx(b.efficiency_jth, 'J/TH', 2);
   $('asic').innerHTML = fx(b.asic_c, '°C', 1);
+  $('outlet').innerHTML = fx(b.outlet_c, '°C', 1);
   $('vr').innerHTML = fx(b.fail_rate_pct, '%', 2);
   $('fan').innerHTML = renderFans(b.fans);
   renderChips(b.chips);
@@ -1332,6 +1357,9 @@ async function tick() {
     const d = await (await fetch('/data')).json();
     if (!d.ok) { $('statusleft').innerHTML = '<span class="dot off"></span>' + d.reason; return; }
     LAST = d;
+    // One-shot: load the persisted fan curve once a board's known, not
+    // every 2s tick, so it doesn't clobber an in-progress edit.
+    if (!CURVE_LOADED && d.boards && d.boards[0]) { CURVE_LOADED = true; loadCurve(); }
     const fleetLabel = 'FLEET MONITOR — ' + d.fleet.boards_online + ' BOARD' + (d.fleet.boards_online === 1 ? '' : 'S');
     $('tagline').textContent = d.miner_name ? (d.miner_name + ' — ' + fleetLabel) : fleetLabel;
     $('statusuptime').textContent = d.uptime ? ('uptime ' + d.uptime) : '—';
@@ -1550,14 +1578,17 @@ async function saveBoardSettings() {
 // 4 separate inputs, and leaves voltage/power target as whatever's already in
 // those fields (real hashrate_cali.ini values only apply to the 3 real modes).
 const TUNE_PRESETS = {
-  '210,230,250,270': { freq: [210, 230, 250, 270], volt: 3392, power_target: 62.0 },
-  '338,358,378,398': { freq: [338, 358, 378, 398], volt: 3496, power_target: 95.0 },
+  // temp_target is hashrate_cali.ini's own field 2 (temp_limit_C) for
+  // each mode -- the same 80/85/90C table nano3s_temp_limit_for_pll0()
+  // and the Fan Control card's default (MED's 85C) already use.
+  '210,230,250,270': { freq: [210, 230, 250, 270], volt: 3392, power_target: 62.0, temp_target: 80.0 },
+  '338,358,378,398': { freq: [338, 358, 378, 398], volt: 3496, power_target: 95.0, temp_target: 85.0 },
   // hashrate_cali.ini's real factory value is 133.0W, but the tuning API
   // caps power_target_w at 130.0 (a deliberate 3W margin under the
   // device's 133W hard ceiling, see nano3s.rs's POWER_TARGET_SAFETY_W) --
   // 133.0 here made the API reject the whole PATCH (freq+volt included,
   // it's one atomic write), so HIGH mode silently never applied anything.
-  '420,440,460,480': { freq: [420, 440, 460, 480], volt: 3704, power_target: 130.0 },
+  '420,440,460,480': { freq: [420, 440, 460, 480], volt: 3704, power_target: 130.0, temp_target: 90.0 },
 };
 function syncTunePreset() {
   const v = $('tunePreset').value;
@@ -1566,6 +1597,7 @@ function syncTunePreset() {
   $('tuneFreq').value = p.freq[0];
   $('tuneVolt').value = p.volt;
   $('tunePowerTarget').value = p.power_target;
+  $('tuneTempTarget').value = p.temp_target;
 }
 async function applyTuning() {
   const board = (LAST && LAST.boards && LAST.boards[0]) ? LAST.boards[0].board_name : null;
@@ -1577,16 +1609,20 @@ async function applyTuning() {
   const volt = +$('tuneVolt').value;
   const powerTargetRaw = $('tunePowerTarget').value;
   const powerTarget = powerTargetRaw === '' ? null : +powerTargetRaw;
+  const tempTargetRaw = $('tuneTempTarget').value;
+  const tempTarget = tempTargetRaw === '' ? null : +tempTargetRaw;
   $('tuneMsg').textContent = 'applying…'; $('tuneMsg').className = 'msg';
   try {
-    // Single combined write (freq + volt + power_target all in one PATCH)
-    // -- previously this was two sequential requests (tuning, then
-    // power-target), which raced two writes to the same control file and
-    // could silently drop the first one before the backend ever read it
-    // ("i applied mode via web and no reaction from miner", 2026-08-06).
-    // See BoardTuningRequest's power_target_w doc comment.
+    // Single combined write (freq + volt + power_target + temp_target all
+    // in one PATCH) -- previously freq/volt and power_target were two
+    // sequential requests, which raced two writes to the same control
+    // file and could silently drop the first one before the backend ever
+    // read it ("i applied mode via web and no reaction from miner",
+    // 2026-08-06). temp_target follows the same rule -- see
+    // BoardTuningRequest's power_target_w/temp_target_c doc comments.
     const body = { pll_freq_mhz: freq, voltage_mv: volt };
     if (powerTarget !== null) body.power_target_w = powerTarget;
+    if (tempTarget !== null) body.temp_target_c = tempTarget;
     const r = await fetch(`/api/v0/boards/${encodeURIComponent(board)}/tuning`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -1599,7 +1635,8 @@ async function applyTuning() {
       return;
     }
     $('tuneMsg').textContent = `applied: ${freq.join('/')}MHz @ ${volt}mV`
-      + (powerTarget !== null ? `, power target ${powerTarget}W` : '') + ' ✓';
+      + (powerTarget !== null ? `, power target ${powerTarget}W` : '')
+      + (tempTarget !== null ? `, temp target ${tempTarget}°C` : '') + ' ✓';
     $('tuneMsg').className = 'msg ok';
   } catch (e) { $('tuneMsg').textContent = 'failed: ' + e; $('tuneMsg').className = 'msg'; }
 }
@@ -1611,13 +1648,15 @@ $('tuneApply').addEventListener('click', applyTuning);
 // Real actuator is duty cycle on pwmchip0/pwm3 (corrected 2026-08-09 --
 // pwm4 was the wrong channel the whole time; pwm3 is genuinely
 // proportional, confirmed by a live sweep matching a real historical
-// stock-firmware measurement of ~3000rpm at 50% duty). auto mode drives
-// duty from real chip temp_max vs the active mode's hashrate_cali.ini
-// limit; manual applies a fixed duty percent, clamped to a 25% floor
-// (FAN_DUTY_MIN_PCT, matching vendor's own real safety minimum) on the
-// harness side regardless of what's requested here.
+// stock-firmware measurement of ~3000rpm at 50% duty). auto mode runs the
+// Fan Curve card's outlet-temp baseline, escalating to 100% whenever any
+// chip crosses the active mode's real tuning limit; manual applies a
+// fixed duty percent with no floor (0-100, per explicit instruction --
+// there's no vendor-characterized safe minimum below 25% on this unit,
+// see FAN_DUTY_MIN_PCT's doc comment in mujina_test_harness.c).
 function syncFanMode() {
-  $('fanManualRow').style.display = ($('fanMode').value === 'manual') ? '' : 'none';
+  const manual = $('fanMode').value === 'manual';
+  $('fanManualRow').style.display = manual ? '' : 'none';
 }
 async function applyFan() {
   const board = (LAST && LAST.boards && LAST.boards[0]) ? LAST.boards[0].board_name : null;
@@ -1639,13 +1678,120 @@ async function applyFan() {
       return;
     }
     $('fanMsg').textContent = (mode === 'manual')
-      ? `applied: manual duty ${body.manual_duty_percent}% (floor 25%) ✓`
-      : 'applied: back to automatic temperature control ✓';
+      ? `applied: manual duty ${body.manual_duty_percent}% (no floor) ✓`
+      : 'applied: back to auto (curve + chip-limit escalation) ✓';
     $('fanMsg').className = 'msg ok';
   } catch (e) { $('fanMsg').textContent = 'failed: ' + e; $('fanMsg').className = 'msg'; }
 }
 $('fanMode').addEventListener('change', syncFanMode);
 $('fanApply').addEventListener('click', applyFan);
+
+// Fan curve -- GET/PATCH /api/v0/boards/{name}/fan-curve. Points are
+// {temp_c, duty_pct} pairs; the harness linearly interpolates between
+// them and clamps outside the configured range. This is only the
+// baseline used in Auto mode -- the chip-limit escalation in
+// fan_reactive_check() overrides it with 100% independent of this curve.
+let CURVE_POINTS = [];
+let CURVE_LOADED = false;
+
+function renderCurveRows() {
+  const wrap = $('curvePoints');
+  wrap.innerHTML = '';
+  CURVE_POINTS.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.cssText = 'display:flex;gap:10px;align-items:flex-end;margin-bottom:8px';
+    row.innerHTML = `
+      <div style="flex:1">
+        <label style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)">Outlet °C</label>
+        <input type="number" class="curveTemp" min="0" max="150" step="0.5" value="${p.temp_c}" style="width:100%">
+      </div>
+      <div style="flex:1">
+        <label style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)">Duty %</label>
+        <input type="number" class="curveDuty" min="0" max="100" step="1" value="${p.duty_pct}" style="width:100%">
+      </div>
+      <button class="btn" data-idx="${i}" title="Remove point" style="padding:9px 12px">×</button>
+    `;
+    const [tempInput, dutyInput] = row.querySelectorAll('input');
+    tempInput.addEventListener('input', () => { CURVE_POINTS[i].temp_c = +tempInput.value; drawCurvePreview(); });
+    dutyInput.addEventListener('input', () => { CURVE_POINTS[i].duty_pct = +dutyInput.value; drawCurvePreview(); });
+    row.querySelector('button').addEventListener('click', () => {
+      if (CURVE_POINTS.length <= 2) { $('curveMsg').textContent = 'need at least 2 points'; $('curveMsg').className = 'msg'; return; }
+      CURVE_POINTS.splice(i, 1);
+      renderCurveRows();
+      drawCurvePreview();
+    });
+    wrap.appendChild(row);
+  });
+}
+
+function drawCurvePreview() {
+  const W = 300, H = 120, PAD = 8;
+  const pts = CURVE_POINTS.slice().sort((a, b) => a.temp_c - b.temp_c);
+  const grid = $('curveGrid');
+  grid.innerHTML = '';
+  for (let i = 1; i < 4; i++) {
+    const y = PAD + (H - 2 * PAD) * i / 4;
+    grid.innerHTML += `<line x1="${PAD}" y1="${y}" x2="${W - PAD}" y2="${y}" />`;
+  }
+  if (!pts.length) { $('curveLine').setAttribute('points', ''); $('curveDots').innerHTML = ''; return; }
+  const tMin = Math.min(...pts.map(p => p.temp_c)), tMax = Math.max(...pts.map(p => p.temp_c), tMin + 1);
+  const x = t => PAD + (W - 2 * PAD) * (t - tMin) / (tMax - tMin);
+  const y = d => H - PAD - (H - 2 * PAD) * (d / 100);
+  $('curveLine').setAttribute('points', pts.map(p => `${x(p.temp_c).toFixed(1)},${y(p.duty_pct).toFixed(1)}`).join(' '));
+  $('curveDots').innerHTML = pts.map(p => `<circle cx="${x(p.temp_c).toFixed(1)}" cy="${y(p.duty_pct).toFixed(1)}" r="3.5"></circle>`).join('');
+}
+
+async function loadCurve() {
+  const board = (LAST && LAST.boards && LAST.boards[0]) ? LAST.boards[0].board_name : null;
+  if (!board) return;
+  try {
+    const r = await fetch(`/api/v0/boards/${encodeURIComponent(board)}/fan-curve`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.points && d.points.length) {
+      CURVE_POINTS = d.points;
+      renderCurveRows();
+      drawCurvePreview();
+    }
+  } catch (e) { /* leave whatever's currently shown */ }
+}
+
+function addCurvePoint() {
+  if (CURVE_POINTS.length >= 8) { $('curveMsg').textContent = 'max 8 points'; $('curveMsg').className = 'msg'; return; }
+  const last = CURVE_POINTS[CURVE_POINTS.length - 1] || { temp_c: 40, duty_pct: 30 };
+  CURVE_POINTS.push({ temp_c: last.temp_c + 5, duty_pct: Math.min(100, last.duty_pct + 15) });
+  renderCurveRows();
+  drawCurvePreview();
+}
+
+async function applyCurve() {
+  const board = (LAST && LAST.boards && LAST.boards[0]) ? LAST.boards[0].board_name : null;
+  if (!board) { $('curveMsg').textContent = 'no board detected yet'; $('curveMsg').className = 'msg'; return; }
+  if (CURVE_POINTS.length < 2) { $('curveMsg').textContent = 'need at least 2 points'; $('curveMsg').className = 'msg'; return; }
+  $('curveMsg').textContent = 'saving…'; $('curveMsg').className = 'msg';
+  try {
+    const r = await fetch(`/api/v0/boards/${encodeURIComponent(board)}/fan-curve`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ points: CURVE_POINTS }),
+    });
+    if (!r.ok) {
+      const detail = await r.text();
+      $('curveMsg').textContent = `save failed (${r.status}): ${detail || 'rejected'}`;
+      $('curveMsg').className = 'msg';
+      return;
+    }
+    const d = await r.json();
+    CURVE_POINTS = d.points;
+    renderCurveRows();
+    drawCurvePreview();
+    $('curveMsg').textContent = `saved ✓ (${CURVE_POINTS.length} points, applied within ~1s)`;
+    $('curveMsg').className = 'msg ok';
+  } catch (e) { $('curveMsg').textContent = 'failed: ' + e; $('curveMsg').className = 'msg'; }
+}
+$('curveAddPoint').addEventListener('click', addCurvePoint);
+$('curveApply').addEventListener('click', applyCurve);
 
 // Power Controls: pause/resume + reboot. `paused` state comes from
 // /nano3s-detail (real chain state), NOT /data's own `paused` field (a

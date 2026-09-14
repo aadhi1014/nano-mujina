@@ -110,6 +110,14 @@ pub struct BoardTuningRequest {
     /// use `PATCH /power-target {target_w: null}` to disable the loop.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub power_target_w: Option<f64>,
+    /// Sets the temp-target PLL frequency auto-throttle's target together
+    /// with freq/voltage/power-target in one atomic write. `None` leaves
+    /// the throttle untouched; use `PATCH /temp-target {target_c: null}`
+    /// to disable it. See `PATCH /boards/{name}/temp-target` for the full
+    /// design (steps frequency down when the hottest chip exceeds target,
+    /// recovers back up to the last commanded frequency).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp_target_c: Option<f64>,
 }
 
 /// Request body for `PATCH /api/v0/boards/{name}/power-target`.
@@ -124,24 +132,72 @@ pub struct BoardPowerTargetRequest {
     pub target_w: Option<f64>,
 }
 
+/// Request body for `PATCH /api/v0/boards/{name}/temp-target`.
+///
+/// Live-edits the temp-target PLL frequency auto-throttle without a
+/// reboot. `target_c: null`/absent disables the loop (frequency stays
+/// wherever it last was, no automatic recovery); a present value sets a
+/// new target, applied on the loop's next status refresh (~15s). Steps
+/// PLL frequency down when the hottest chip (`temp_max`) exceeds target
+/// and back up when comfortably under, recovering only up to the last
+/// dashboard/API-commanded frequency -- distinct from fan control
+/// (`PATCH /boards/{name}/fan`/`/fan-curve`), which adjusts fan duty
+/// instead and never touches frequency.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct BoardTempTargetRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_c: Option<f64>,
+}
+
 /// Request body for `PATCH /api/v0/boards/{name}/fan`.
 ///
-/// Live-edits the fan PID controller (`mujina_test_harness.c`'s
-/// `fan_pid_control()`) without a reboot. Fan commands never touch
+/// Live-edits fan mode without a reboot. Fan commands never touch
 /// `power_en`.
 ///
-/// `mode`: `"auto"` runs PID control (the default); `"manual"` requires
-/// `manual_duty_percent` and holds the fan at that fixed duty (0-100)
-/// until switched back to `"auto"`. `target_temp_c` overrides the PID's
-/// target temperature (default 85C) independent of `mode`.
+/// `mode`: `"auto"` (the default) runs the fan curve
+/// (`PATCH /boards/{name}/fan-curve`) plus the chip-temp escalation that
+/// overrides it near the active mode's tuning limit; `"manual"` requires
+/// `manual_duty_percent` and holds the fan at that fixed duty (0-100),
+/// suspending both the curve and the escalation, until switched back to
+/// `"auto"`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct BoardFanRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manual_duty_percent: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_temp_c: Option<f64>,
+}
+
+/// One point on the fan curve: at `temp_c` outlet temperature, run the
+/// fan at `duty_pct`. Points between the ones you set are linearly
+/// interpolated by the harness; below the lowest point's temp the curve
+/// clamps to that point's duty, above the highest it clamps to that
+/// point's duty (never extrapolates).
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct FanCurvePoint {
+    pub temp_c: f64,
+    pub duty_pct: f64,
+}
+
+/// Request body for `PATCH /api/v0/boards/{name}/fan-curve`.
+///
+/// Sets the fan's outlet-temp baseline curve (2-8 points, any order --
+/// the harness sorts by `temp_c` before applying/persisting). This is
+/// only the baseline: it's overridden by 100% whenever the hottest chip
+/// crosses the active mode's real tuning limit (`temp_target_c`'s design,
+/// `PATCH /boards/{name}/temp-target`), independent of outlet temp.
+/// Applied live (harness picks it up within ~1s) and persisted, so it
+/// survives reboots.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct FanCurveRequest {
+    pub points: Vec<FanCurvePoint>,
+}
+
+/// Response body for `GET /api/v0/boards/{name}/fan-curve` -- the
+/// currently persisted/applied curve, sorted ascending by `temp_c`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct FanCurveResponse {
+    pub points: Vec<FanCurvePoint>,
 }
 
 /// Request body for `PATCH /api/v0/boards/{name}/pause`.
@@ -188,6 +244,40 @@ pub struct BoardLedState {
     pub color: String,
     pub brightness: u8,
     pub speed: u8,
+}
+
+/// Request body for `PATCH /api/v0/pool`.
+///
+/// Persists to `/data/userconfig/pool.conf`, taking effect on the miner's
+/// next startup -- the stratum client has no hot-reload path, so an
+/// in-place pool change isn't possible without dropping and recreating
+/// its connection task. Applying a saved change requires a full device
+/// reboot (`POST /api/v0/reboot`); restarting just the `mujina-minerd`
+/// process leaves the RT-Smart core's IPC handle stale. At least one
+/// field must be present. Fields left unset keep their currently
+/// persisted value; `password` left unset keeps whatever password is
+/// already stored.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct PoolConfigRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// Response body for `GET /api/v0/pool` -- the currently persisted pool
+/// config (what will apply on the miner's next restart), which is not
+/// necessarily what the running process actually connected with at its
+/// own last startup (see `GET /api/v0/sources` for that). `password` is
+/// never returned in cleartext; `password_set` reports whether one is
+/// stored.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct PoolConfigResponse {
+    pub url: Option<String>,
+    pub user: Option<String>,
+    pub password_set: bool,
 }
 
 /// Job source telemetry.
