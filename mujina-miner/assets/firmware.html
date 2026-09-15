@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUJINA // FIRMWARE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cyan: #00f0ff;
+    --mag: #ff2e97;
+    --lime: #c8ff00;
+    --amber: #ffb000;
+    --green: #1bff9c;
+    --red: #ff3860;
+    --purple: #b967ff;
+    --bg: #05060c;
+    --panel: #0a0f1c;
+    --panel2: #0d1424;
+    --line: #14243a;
+    --dim: #4a6a86;
+    --ink: #d6f7ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Share Tech Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 24px 20px 60px; }
+  .top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 20px;
+    flex-wrap: wrap; gap: 10px;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-weight: 900; margin: 0;
+    font-size: 22px; letter-spacing: .16em; text-transform: uppercase;
+  }
+  h1 .chev { color: var(--cyan); text-shadow: 0 0 8px rgba(0,240,255,.5); }
+  .nav a {
+    color: var(--dim); text-decoration: none; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; margin-left: 18px;
+    border-bottom: 1px solid transparent; padding-bottom: 3px;
+  }
+  .nav a:hover, .nav a.active { color: var(--cyan); border-color: var(--cyan); }
+  .status-strip {
+    display: flex; gap: 8px; align-items: center; font-size: 12px;
+    color: var(--dim); letter-spacing: .05em;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+  .sec { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 12px;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--dim);
+    margin: 28px 0 12px; display: flex; align-items: center; gap: 10px; }
+  .sec:first-of-type { margin-top: 0; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+  .sec-sub { font-family: 'Share Tech Mono', monospace; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--dim); flex: none; }
+
+  .warn-banner {
+    background: rgba(255,176,0,.08); border: 1px solid var(--amber); border-radius: 6px;
+    padding: 14px 16px; margin-bottom: 24px; font-size: 12px; line-height: 1.6; color: var(--ink);
+  }
+  .warn-banner b { color: var(--amber); }
+
+  .card { background: var(--panel); border: 1px solid var(--line); padding: 18px; }
+  .card + .card { margin-top: 20px; }
+  .hint { font-size: 12px; color: var(--dim); margin: 0 0 14px; line-height: 1.5; }
+  .hint code { color: var(--ink); }
+
+  .filerow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  input[type=file] {
+    flex: 1; min-width: 220px; background: var(--panel2); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 4px; padding: 9px 10px; font: inherit; font-size: 12px;
+  }
+
+  .btn {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--ink);
+    padding: 11px 18px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer;
+    border-radius: 4px; transition: all .12s;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover:not(:disabled) { background: rgba(255,56,96,.1); box-shadow: 0 0 12px rgba(255,56,96,.25); }
+  .btn:disabled { opacity: .4; cursor: default; }
+
+  .progress-track { height: 6px; background: var(--panel2); border: 1px solid var(--line); border-radius: 3px;
+    overflow: hidden; margin-top: 12px; display: none; }
+  .progress-fill { height: 100%; width: 0%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); transition: width .1s linear; }
+
+  .msg { margin-top: 12px; font-size: 12px; color: var(--dim); }
+  .msg.ok { color: var(--green); }
+  .msg.err { color: var(--red); }
+  .msg.pending { color: var(--amber); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1><span class="chev">//</span>MUJINA <span style="color:var(--dim);font-weight:400">/ FIRMWARE</span></h1>
+    <div style="display:flex;align-items:center;gap:18px">
+      <div class="status-strip"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+      <nav class="nav">
+        <a href="/dashboard">Dashboard</a>
+        <a href="/info">Info</a>
+        <a href="/led">LED</a>
+        <a href="/pool">Pool</a>
+        <a href="/firmware" class="active">Firmware</a>
+      </nav>
+    </div>
+  </div>
+
+  <div class="warn-banner">
+    <b>One-step, no confirmation.</b> Uploading a file here swaps it in and reboots the device immediately — there's no separate "apply" click. The upload is checked for a valid ELF header (and, for mujina-minerd, the <code>nano3s</code> feature symbols) before anything is written, but a working build that's simply wrong for this hardware can still be uploaded. Mining stops for a couple of minutes while it reboots.
+  </div>
+
+  <div class="sec">Update Everything<span class="sec-sub">one upload, one reboot — pick either or both</span></div>
+  <div class="card">
+    <p class="hint">Picks both binaries here and applies them together in a single reboot cycle, instead of two separate upload-and-reboot rounds. Bundled into one file entirely in your browser — nothing to pre-package. (Scripting a deploy instead? <code>rtos_core/tools/pack_firmware_bundle.py</code> builds the same format from the command line.)</p>
+    <div class="filerow">
+      <label style="min-width:110px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)">mujina-minerd</label>
+      <input type="file" id="bundleMinerd">
+    </div>
+    <div class="filerow">
+      <label style="min-width:110px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)">harness</label>
+      <input type="file" id="bundleHarness">
+    </div>
+    <div style="display:flex;justify-content:flex-end">
+      <button class="btn danger" id="uploadBundle">Upload &amp; Apply Both</button>
+    </div>
+    <div class="progress-track" id="progressBundle"><div class="progress-fill" id="progressBundleFill"></div></div>
+    <div class="msg" id="msgBundle"></div>
+  </div>
+
+  <div class="sec">Update One Component<span class="sec-sub">advanced — each of these reboots on its own</span></div>
+  <div class="sec" style="margin-top:0">mujina-minerd<span class="sec-sub">/data/mujina-minerd — the Rust daemon</span></div>
+  <div class="card">
+    <p class="hint">Cross-compiled with <code>nano3s</code> feature enabled, statically linked (<code>+crt-static</code>). Typically ~19MB.</p>
+    <div class="filerow">
+      <input type="file" id="fileMinerd">
+      <button class="btn danger" id="uploadMinerd">Upload &amp; Apply</button>
+    </div>
+    <div class="progress-track" id="progressMinerd"><div class="progress-fill" id="progressMinerdFill"></div></div>
+    <div class="msg" id="msgMinerd"></div>
+  </div>
+
+  <div class="sec">Harness<span class="sec-sub">/mntapp/release/linux/app/mujina_test_harness — fan/power_en control</span></div>
+  <div class="card">
+    <p class="hint">Statically linked riscv64 glibc binary. Typically under 1MB. <code>/mntapp</code> is only 7.4MB total — leave real headroom.</p>
+    <div class="filerow">
+      <input type="file" id="fileHarness">
+      <button class="btn danger" id="uploadHarness">Upload &amp; Apply</button>
+    </div>
+    <div class="progress-track" id="progressHarness"><div class="progress-fill" id="progressHarnessFill"></div></div>
+    <div class="msg" id="msgHarness"></div>
+  </div>
+</div>
+
+<script>
+function $(id) { return document.getElementById(id); }
+
+async function checkConn() {
+  try {
+    const r = await fetch('/api/v0/health', { cache: 'no-store' });
+    $('connDot').className = 'dot ' + (r.ok ? 'ok' : 'bad');
+    $('connText').textContent = r.ok ? 'live' : 'unreachable';
+  } catch (e) {
+    $('connDot').className = 'dot bad';
+    $('connText').textContent = 'unreachable';
+  }
+}
+checkConn();
+setInterval(checkConn, 5000);
+
+function uploadFirmware(target, fileInputId, buttonId, progressId, progressFillId, msgId) {
+  const btn = $(buttonId), msg = $(msgId), track = $(progressId), fill = $(progressFillId);
+  const file = $(fileInputId).files[0];
+  if (!file) { msg.textContent = 'pick a file first'; msg.className = 'msg'; return; }
+  if (!confirm(`Upload "${file.name}" (${file.size.toLocaleString()} bytes) as ${target}? The device reboots immediately after a successful upload, no further confirmation.`)) return;
+
+  btn.disabled = true;
+  track.style.display = '';
+  fill.style.width = '0%';
+  msg.textContent = 'uploading…'; msg.className = 'msg pending';
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', `/api/v0/firmware/${encodeURIComponent(target)}`);
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round(100 * e.loaded / e.total);
+      fill.style.width = pct + '%';
+      msg.textContent = `uploading… ${pct}% (${e.loaded.toLocaleString()} / ${e.total.toLocaleString()} bytes)`;
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      let detail = 'applied';
+      try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
+      msg.textContent = `${detail} ✓ — waiting for device to come back online…`;
+      msg.className = 'msg pending';
+      pollForReboot(msg, btn);
+    } else {
+      msg.textContent = `upload failed (${xhr.status}): ${xhr.responseText || 'rejected'}`;
+      msg.className = 'msg err';
+      btn.disabled = false;
+    }
+  };
+  xhr.onerror = () => {
+    msg.textContent = 'upload failed: network error';
+    msg.className = 'msg err';
+    btn.disabled = false;
+  };
+  xhr.send(file);
+}
+
+async function pollForReboot(msg, btn) {
+  // Give the reboot a moment to actually happen before polling, so the
+  // very first check doesn't just hit the still-alive old process.
+  await new Promise(r => setTimeout(r, 5000));
+  const deadline = Date.now() + 4 * 60 * 1000;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch('/api/v0/health', { cache: 'no-store' });
+      if (r.ok) {
+        msg.textContent = 'back online ✓';
+        msg.className = 'msg ok';
+        btn.disabled = false;
+        return;
+      }
+    } catch (e) { /* still down, keep polling */ }
+    await new Promise(r => setTimeout(r, 4000));
+  }
+  msg.textContent = 'still unreachable after 4 minutes — check the device directly';
+  msg.className = 'msg err';
+  btn.disabled = false;
+}
+
+$('uploadMinerd').addEventListener('click', () =>
+  uploadFirmware('mujina-minerd', 'fileMinerd', 'uploadMinerd', 'progressMinerd', 'progressMinerdFill', 'msgMinerd'));
+$('uploadHarness').addEventListener('click', () =>
+  uploadFirmware('harness', 'fileHarness', 'uploadHarness', 'progressHarness', 'progressHarnessFill', 'msgHarness'));
+
+// Bundle: packs whichever file(s) are picked into the MJBUNDL1 format
+// (see pack_firmware_bundle.py / post_firmware_bundle in v0.rs) entirely
+// client-side, then uploads that one blob to /firmware/bundle so both
+// binaries apply in a single reboot instead of two.
+function u32le(n) {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, true);
+  return b;
+}
+
+async function buildBundle(minerdFile, harnessFile) {
+  const minerdBytes = minerdFile ? new Uint8Array(await minerdFile.arrayBuffer()) : new Uint8Array(0);
+  const harnessBytes = harnessFile ? new Uint8Array(await harnessFile.arrayBuffer()) : new Uint8Array(0);
+  return new Blob([
+    new TextEncoder().encode('MJBUNDL1'),
+    u32le(minerdBytes.length), minerdBytes,
+    u32le(harnessBytes.length), harnessBytes,
+  ], { type: 'application/octet-stream' });
+}
+
+async function uploadBundle() {
+  const btn = $('uploadBundle'), msg = $('msgBundle'), track = $('progressBundle'), fill = $('progressBundleFill');
+  const minerdFile = $('bundleMinerd').files[0];
+  const harnessFile = $('bundleHarness').files[0];
+  if (!minerdFile && !harnessFile) { msg.textContent = 'pick at least one file'; msg.className = 'msg'; return; }
+
+  const names = [minerdFile ? `mujina-minerd (${minerdFile.name})` : null, harnessFile ? `harness (${harnessFile.name})` : null].filter(Boolean).join(' + ');
+  if (!confirm(`Apply ${names}? The device reboots immediately after a successful upload, no further confirmation.`)) return;
+
+  btn.disabled = true;
+  msg.textContent = 'packing…'; msg.className = 'msg pending';
+  const blob = await buildBundle(minerdFile, harnessFile);
+
+  track.style.display = '';
+  fill.style.width = '0%';
+  msg.textContent = 'uploading…'; msg.className = 'msg pending';
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/v0/firmware/bundle');
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round(100 * e.loaded / e.total);
+      fill.style.width = pct + '%';
+      msg.textContent = `uploading… ${pct}% (${e.loaded.toLocaleString()} / ${e.total.toLocaleString()} bytes)`;
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      let detail = 'applied';
+      try {
+        const d = JSON.parse(xhr.responseText);
+        detail = `applied: ${(d.applied || []).join(', ')}`;
+      } catch (e) {}
+      msg.textContent = `${detail} ✓ — waiting for device to come back online…`;
+      msg.className = 'msg pending';
+      pollForReboot(msg, btn);
+    } else {
+      msg.textContent = `upload failed (${xhr.status}): ${xhr.responseText || 'rejected'}`;
+      msg.className = 'msg err';
+      btn.disabled = false;
+    }
+  };
+  xhr.onerror = () => {
+    msg.textContent = 'upload failed: network error';
+    msg.className = 'msg err';
+    btn.disabled = false;
+  };
+  xhr.send(blob);
+}
+$('uploadBundle').addEventListener('click', uploadBundle);
+</script>
+</body>
+</html>

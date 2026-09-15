@@ -280,6 +280,35 @@ pub struct PoolConfigResponse {
     pub password_set: bool,
 }
 
+/// Response body for `POST /api/v0/firmware/{target}`.
+///
+/// By the time this is returned, the binary is already swapped in and a
+/// full device reboot is already scheduled -- there is no separate apply
+/// step. See the handler's own doc comment for why a reboot (not a
+/// process-only restart) always follows a successful upload.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct FirmwareUploadResponse {
+    pub ok: bool,
+    /// Echoes the `target` path segment ("mujina-minerd" or "harness").
+    pub target: String,
+    pub size: usize,
+    pub detail: String,
+}
+
+/// Response body for `POST /api/v0/firmware/bundle`.
+///
+/// `applied` lists which of `["mujina-minerd", "harness"]` were actually
+/// included and swapped in. By the time this is returned every included
+/// binary is already applied and a single reboot is already scheduled --
+/// see `FirmwareUploadResponse`'s doc comment for why it's a reboot and
+/// not a process-only restart.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct FirmwareBundleResponse {
+    pub ok: bool,
+    pub applied: Vec<String>,
+    pub detail: String,
+}
+
 /// Job source telemetry.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
 pub struct SourceTelemetry {

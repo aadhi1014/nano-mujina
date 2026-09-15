@@ -31,6 +31,10 @@ const LED_HTML: &str = include_str!("../../assets/led.html");
 /// `/dashboard` for the same reason `/led` is -- a standing config surface
 /// rather than a telemetry view.
 const POOL_HTML: &str = include_str!("../../assets/pool.html");
+/// Network firmware updater (upload mujina-minerd or the harness binary,
+/// applied immediately with a reboot) -- separate from `/dashboard` for
+/// the same reason `/led`/`/pool` are.
+const FIRMWARE_HTML: &str = include_str!("../../assets/firmware.html");
 /// Header brandmark -- mujina-head-mark.svg from rkuester's
 /// mujina-logo-set (github.com/rkuester/mujina-logo-set), used with the
 /// author's permission. Served from its own route rather than inlined
@@ -87,6 +91,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/info", routing::get(serve_info_page))
         .route("/led", routing::get(serve_led_page))
         .route("/pool", routing::get(serve_pool_page))
+        .route("/firmware", routing::get(serve_firmware_page))
         .route("/nano3s-detail", routing::get(serve_nano3s_detail))
         .route("/mujina-head-mark.svg", routing::get(serve_logo_svg))
         .route("/doom/launch", routing::post(launch_doom))
@@ -139,6 +144,10 @@ async fn serve_led_page() -> impl IntoResponse {
 
 async fn serve_pool_page() -> impl IntoResponse {
     Html(POOL_HTML)
+}
+
+async fn serve_firmware_page() -> impl IntoResponse {
+    Html(FIRMWARE_HTML)
 }
 
 /// Per-chip and chain-wide detail from the latest `IPC_MSG_STATUS`.

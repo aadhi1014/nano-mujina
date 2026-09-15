@@ -5,7 +5,8 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
 };
 use std::time::Duration;
@@ -18,9 +19,21 @@ use super::server::SharedState;
 use crate::api_client::types::{
     BoardFanRequest, BoardLedRequest, BoardLedState, BoardPauseRequest, BoardPowerTargetRequest,
     BoardTelemetry, BoardTempTargetRequest, BoardTuningRequest, FanCurvePoint, FanCurveRequest,
-    FanCurveResponse, MinerPatchRequest, MinerTelemetry, PoolConfigRequest, PoolConfigResponse,
-    SourceTelemetry,
+    FanCurveResponse, FirmwareBundleResponse, FirmwareUploadResponse, MinerPatchRequest,
+    MinerTelemetry, PoolConfigRequest, PoolConfigResponse, SourceTelemetry,
 };
+
+/// Upper bound on a firmware upload body -- generous headroom over the
+/// real binaries (mujina-minerd ~19MB stripped, the harness ~740KB), just
+/// large enough to reject obviously-wrong uploads before they hit disk.
+const FIRMWARE_MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Reject anything implausibly small -- catches an empty/truncated upload
+/// before it ever reaches the ELF-magic check.
+const FIRMWARE_MIN_UPLOAD_BYTES: usize = 64 * 1024;
+/// Free space required on the target partition beyond the upload's own
+/// size, so a swap never runs the partition to 0 free the way a stacked
+/// series of manual deploys did earlier in this project's history.
+const FIRMWARE_FREE_SPACE_MARGIN_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Build the v0 API routes with OpenAPI metadata.
 pub fn routes() -> OpenApiRouter<SharedState> {
@@ -38,8 +51,11 @@ pub fn routes() -> OpenApiRouter<SharedState> {
         .routes(routes!(get_board_led, patch_board_led))
         .routes(routes!(post_reboot))
         .routes(routes!(get_pool, patch_pool))
+        .routes(routes!(post_firmware_upload))
+        .routes(routes!(post_firmware_bundle))
         .routes(routes!(get_sources))
         .routes(routes!(get_source))
+        .layer(DefaultBodyLimit::max(FIRMWARE_MAX_UPLOAD_BYTES))
 }
 
 /// Health check endpoint.
@@ -677,6 +693,249 @@ async fn post_reboot() -> StatusCode {
         let _ = std::process::Command::new("reboot").status();
     });
     StatusCode::OK
+}
+
+/// Live path this binary is actually deployed to, and its holding
+/// filesystem -- used for the pre-write free-space check.
+fn firmware_target_path(target: &str) -> Option<(&'static str, &'static str)> {
+    match target {
+        "mujina-minerd" => Some(("/data/mujina-minerd", "/data")),
+        "harness" => Some(("/mntapp/release/linux/app/mujina_test_harness", "/mntapp")),
+        _ => None,
+    }
+}
+
+/// Free space on `mount_point`, in bytes, via `df -k` -- no new crate
+/// dependency, consistent with this codebase's existing pattern of
+/// shelling out to system tools (i2cset, reboot, etc.) for one-off system
+/// queries rather than linking libc/statvfs directly.
+fn free_space_bytes(mount_point: &str) -> Option<u64> {
+    let out = std::process::Command::new("df").arg("-k").arg(mount_point).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
+    // `df -k` columns: Filesystem, 1K-blocks, Used, Available, Use%, Mounted.
+    fields.get(3)?.parse::<u64>().ok().map(|kb| kb * 1024)
+}
+
+/// Upload and apply a new `mujina-minerd` or harness binary, then reboot.
+///
+/// `target` is `mujina-minerd` or `harness`. Body is the raw ELF binary
+/// (`application/octet-stream`), no multipart wrapper. Validates ELF magic
+/// and, for `mujina-minerd` specifically, the presence of `nano3s_ipc_`
+/// symbol strings -- the same sanity check `build_mujina_minerd.sh` itself
+/// runs, catching a build that silently compiled out the `nano3s` Cargo
+/// feature (a real, previously-hit failure mode: the binary builds and
+/// runs, but the board driver is missing entirely). Writes to `<path>.new`
+/// first, checking free space beforehand so a swap never runs the target
+/// partition to 0 bytes free.
+///
+/// One-step by design: on success, the binary is already swapped in when
+/// this responds, and a full device reboot is already in flight (not a
+/// process-only restart -- swapping either binary in place and only
+/// killing the process leaves the RT-Smart core's IPC handle stale, a
+/// real, previously-hit failure mode for `mujina-minerd`; the harness
+/// holds no such handle but reboots the same way for consistency and
+/// because a fresh boot is the only state this endpoint has actually
+/// verified working). There is no confirmation step -- a successful
+/// upload commits to applying it.
+#[utoipa::path(
+    post,
+    path = "/firmware/{target}",
+    tag = "miner",
+    params(
+        ("target" = String, Path, description = "\"mujina-minerd\" or \"harness\""),
+    ),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    responses(
+        (status = OK, description = "Binary swapped in, reboot initiated", body = FirmwareUploadResponse),
+        (status = BAD_REQUEST, description = "Unknown target, empty/oversized body, bad ELF magic, or (mujina-minerd) missing nano3s feature symbols"),
+        (status = INSUFFICIENT_STORAGE, description = "Not enough free space on the target partition"),
+        (status = INTERNAL_SERVER_ERROR, description = "Write or rename failed"),
+    ),
+)]
+async fn post_firmware_upload(
+    Path(target): Path<String>,
+    body: Bytes,
+) -> Result<Json<FirmwareUploadResponse>, (StatusCode, String)> {
+    let live_path = validate_and_stage_firmware(&target, &body)?;
+    std::fs::rename(&format!("{live_path}.new"), &live_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to swap in {live_path}: {e}")))?;
+
+    let size = body.len();
+    schedule_reboot();
+
+    Ok(Json(FirmwareUploadResponse {
+        ok: true,
+        target,
+        size,
+        detail: "swapped in, rebooting now".to_string(),
+    }))
+}
+
+/// Validates `body` for `target` (unknown target, size bounds, ELF magic,
+/// and -- for `mujina-minerd` -- `nano3s_ipc_*` symbols) and free space on
+/// the target partition, then writes `body` to `<live_path>.new` (mode
+/// 0755). Does **not** rename it into place -- callers do that themselves
+/// once every binary in a batch has staged successfully, so a bundle
+/// upload can't apply the first binary and then fail on the second,
+/// leaving the pair mismatched. Returns the live path on success.
+fn validate_and_stage_firmware(target: &str, body: &[u8]) -> Result<String, (StatusCode, String)> {
+    let Some((live_path, mount_point)) = firmware_target_path(target) else {
+        return Err((StatusCode::BAD_REQUEST, format!("unknown target {target:?} (want \"mujina-minerd\" or \"harness\")")));
+    };
+
+    if body.len() < FIRMWARE_MIN_UPLOAD_BYTES {
+        return Err((StatusCode::BAD_REQUEST, format!("{target}: upload too small ({} bytes) -- looks empty or truncated", body.len())));
+    }
+    if body.len() > FIRMWARE_MAX_UPLOAD_BYTES {
+        return Err((StatusCode::BAD_REQUEST, format!("{target}: upload too large ({} bytes)", body.len())));
+    }
+    if body.len() < 4 || &body[0..4] != b"\x7fELF" {
+        return Err((StatusCode::BAD_REQUEST, format!("{target}: not an ELF binary (bad magic)")));
+    }
+    if target == "mujina-minerd" {
+        let has_nano3s_symbols = body.windows(b"nano3s_ipc_".len()).any(|w| w == b"nano3s_ipc_");
+        if !has_nano3s_symbols {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "{target}: no nano3s_ipc_* symbols found in this binary -- it was very likely built \
+                     without the nano3s Cargo feature and would silently run with no board driver at all"
+                ),
+            ));
+        }
+    }
+
+    let needed = body.len() as u64 + FIRMWARE_FREE_SPACE_MARGIN_BYTES;
+    match free_space_bytes(mount_point) {
+        Some(free) if free < needed => {
+            return Err((
+                StatusCode::INSUFFICIENT_STORAGE,
+                format!(
+                    "{target}: not enough free space on {mount_point}: {free} bytes free, need {needed} \
+                     (upload size + {FIRMWARE_FREE_SPACE_MARGIN_BYTES}-byte margin)"
+                ),
+            ));
+        }
+        Some(_) => {}
+        None => {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{target}: couldn't determine free space on {mount_point}")));
+        }
+    }
+
+    let staged_path = format!("{live_path}.new");
+    std::fs::write(&staged_path, body).map_err(|e| {
+        let _ = std::fs::remove_file(&staged_path);
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("{target}: failed to write {staged_path}: {e}"))
+    })?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged_path, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+            let _ = std::fs::remove_file(&staged_path);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{target}: failed to chmod {staged_path}: {e}"))
+        })?;
+    }
+
+    Ok(live_path.to_string())
+}
+
+fn schedule_reboot() {
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = std::process::Command::new("reboot").status();
+    });
+}
+
+/// Parses a `POST /firmware/bundle` body into its (up to 2) sections.
+///
+/// Format (chosen to avoid pulling in a tar/zip crate for two files):
+/// 8-byte magic `b"MJBUNDL1"`, then for each of mujina-minerd and harness
+/// in that fixed order: a 4-byte little-endian length followed by that
+/// many bytes (length 0 means "not included in this bundle" -- the
+/// bundle only needs to touch one binary if that's all the caller wants
+/// to change, while still going through the single-reboot bundle path).
+/// See `pack_firmware_bundle.py` for the matching packer.
+fn parse_firmware_bundle(body: &[u8]) -> Result<(Option<&[u8]>, Option<&[u8]>), (StatusCode, String)> {
+    const MAGIC: &[u8] = b"MJBUNDL1";
+    let bad = |msg: &str| (StatusCode::BAD_REQUEST, format!("malformed bundle: {msg}"));
+
+    if body.len() < MAGIC.len() || &body[..MAGIC.len()] != MAGIC {
+        return Err(bad("bad magic (expected \"MJBUNDL1\") -- build the bundle with pack_firmware_bundle.py, don't concatenate the binaries by hand"));
+    }
+    let mut cursor = MAGIC.len();
+    let mut sections = [None, None];
+    for section in sections.iter_mut() {
+        let Some(len_bytes) = body.get(cursor..cursor + 4) else {
+            return Err(bad("truncated -- missing a length field"));
+        };
+        let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+        cursor += 4;
+        if len > 0 {
+            let Some(data) = body.get(cursor..cursor + len) else {
+                return Err(bad("truncated -- section length runs past end of file"));
+            };
+            *section = Some(data);
+            cursor += len;
+        }
+    }
+    let [mujina_minerd, harness] = sections;
+    if mujina_minerd.is_none() && harness.is_none() {
+        return Err(bad("both sections empty -- nothing to apply"));
+    }
+    Ok((mujina_minerd, harness))
+}
+
+/// Upload one file that updates mujina-minerd and/or the harness in a
+/// single reboot, instead of running the single-target endpoint twice
+/// (which would reboot twice -- once per upload). See
+/// `parse_firmware_bundle`'s doc comment for the file format and
+/// `pack_firmware_bundle.py` for the packer that builds one from your
+/// locally-built binaries.
+///
+/// Both included binaries are fully validated (same checks as the
+/// single-target endpoint) and staged to `<path>.new` *before* either is
+/// renamed into place, so a bad second binary can't leave the pair
+/// mismatched -- either both apply or neither does.
+#[utoipa::path(
+    post,
+    path = "/firmware/bundle",
+    tag = "miner",
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    responses(
+        (status = OK, description = "All included binaries swapped in, reboot initiated", body = FirmwareBundleResponse),
+        (status = BAD_REQUEST, description = "Malformed bundle, or a section failed the same checks the single-target endpoint runs"),
+        (status = INSUFFICIENT_STORAGE, description = "Not enough free space for one of the included binaries"),
+        (status = INTERNAL_SERVER_ERROR, description = "Write, chmod, or rename failed"),
+    ),
+)]
+async fn post_firmware_bundle(body: Bytes) -> Result<Json<FirmwareBundleResponse>, (StatusCode, String)> {
+    let (mujina_minerd, harness) = parse_firmware_bundle(&body)?;
+
+    // Validate + stage everything first; only rename (apply) once every
+    // included section has staged successfully.
+    let mut staged: Vec<&'static str> = Vec::new();
+    if let Some(data) = mujina_minerd {
+        validate_and_stage_firmware("mujina-minerd", data)?;
+        staged.push("mujina-minerd");
+    }
+    if let Some(data) = harness {
+        validate_and_stage_firmware("harness", data)?;
+        staged.push("harness");
+    }
+
+    for target in &staged {
+        let (live_path, _) = firmware_target_path(target).expect("validated above");
+        std::fs::rename(&format!("{live_path}.new"), live_path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{target}: staged but failed to swap in {live_path}: {e}")))?;
+    }
+
+    schedule_reboot();
+
+    Ok(Json(FirmwareBundleResponse {
+        ok: true,
+        applied: staged.iter().map(|s| s.to_string()).collect(),
+        detail: "swapped in, rebooting now".to_string(),
+    }))
 }
 
 /// Return the currently persisted pool configuration.
