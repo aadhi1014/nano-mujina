@@ -40,10 +40,11 @@ environment needed), or build from source and deploy over SSH
 
 ### Quick Install: Flash a Pre-built Image
 
-Download **[nano-mujina-alpha-v2.kdimg](https://github.com/aadhi1014/nano-mujina/releases/download/alpha-v2/nano-mujina-alpha-v2.kdimg)**
-(123MB, see the [release notes](https://github.com/aadhi1014/nano-mujina/releases/tag/alpha-v2)
-for what's in it -- fixes a WiFi-network-list bug on Android found in
-alpha-v1) and burn it with the same official K230 Burning Tool
+Download **[nano-mujina-alpha-v3.kdimg](https://github.com/aadhi1014/nano-mujina/releases/download/alpha-v3/nano-mujina-alpha-v3.kdimg)**
+(123MB, see the [release notes](https://github.com/aadhi1014/nano-mujina/releases/tag/alpha-v3)
+for what's in it -- pool config page, outlet-temp display, a PLL
+temp-target throttle, a user-editable fan curve, and a network firmware
+updater) and burn it with the same official K230 Burning Tool
 Canaan's own [flashing instructions](https://github.com/Canaan-Creative/Avalon_Nano3s#3-imges-burning)
 use. Unlike the stock image, no WiFi credentials or other
 device-specific data are baked in -- the device boots straight into
@@ -72,7 +73,7 @@ first-time BLE setup.
 2) **Open and select the image**:
 
    **Windows** -- run `K230BurningTool.exe`, click Open, select
-   `nano-mujina-alpha-v2.kdimg`, set Image part name to "all", and set
+   `nano-mujina-alpha-v3.kdimg`, set Image part name to "all", and set
    Medium to "SPI NAND".
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_open.png)
    ![](https://raw.githubusercontent.com/Canaan-Creative/Avalon_Nano3s/master/docs/burn_tool_select.png)
@@ -80,7 +81,7 @@ first-time BLE setup.
    **Linux / macOS** -- put the device in burn mode first (step 3
    below), then run:
    ```bash
-   k230-flash -m SPI_NAND nano-mujina-alpha-v2.kdimg
+   k230-flash -m SPI_NAND nano-mujina-alpha-v3.kdimg
    ```
    `k230-flash --list-devices` confirms it's detected before flashing,
    if you want to check first.
@@ -117,6 +118,24 @@ first-time BLE setup.
 Burning-tool screenshots and the recovery-pin photo above are from
 Canaan's own [Avalon_Nano3s](https://github.com/Canaan-Creative/Avalon_Nano3s)
 repository, since it's literally the same official tool.
+
+#### Already Have a Working Device? Update Over the Network Instead
+
+If you've already flashed and set up a Nano3s, you don't need to
+re-burn the whole image for a software update. Download
+**[nano-mujina-alpha-v3-bundle.bin](https://github.com/aadhi1014/nano-mujina/releases/download/alpha-v3/nano-mujina-alpha-v3-bundle.bin)**
+and either upload it from the device's own dashboard (`/firmware`
+page), or:
+
+```bash
+curl -X POST --data-binary @nano-mujina-alpha-v3-bundle.bin \
+  -H "Content-Type: application/octet-stream" \
+  http://<device-ip>/api/v0/firmware/bundle
+```
+
+This updates both `mujina-minerd` and the fan/power harness in a
+single reboot and keeps everything else as-is -- WiFi, pool config,
+fan curve. No USB cable, no burning tool, no BLE re-setup.
 
 ### Build From Source
 
