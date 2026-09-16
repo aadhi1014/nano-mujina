@@ -200,6 +200,43 @@ pub struct FanCurveResponse {
     pub points: Vec<FanCurvePoint>,
 }
 
+/// Request body for `PATCH /api/v0/boards/{name}/psu`.
+///
+/// Sets a manual override for the USB-C PD power-contract ceiling used
+/// by the power-target safety trip. `override_max_w: null`/absent
+/// clears the override, reverting to auto-detection from the measured
+/// INA226 bus voltage. The override can only ever tighten the existing
+/// hardware ceiling, never loosen it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct PsuOverrideRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_max_w: Option<f64>,
+}
+
+/// Response body for `GET /api/v0/boards/{name}/psu`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct PsuStatusResponse {
+    /// Live USB-C PD input rail voltage (INA226 bus voltage), volts.
+    /// `null` if the sensor couldn't be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bus_v: Option<f64>,
+    /// HUSB238A ATTACH bit -- whether a PD contract is currently
+    /// established. `null` if the chip couldn't be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attached: Option<bool>,
+    /// Power ceiling classified from `bus_v` alone (see
+    /// `pd_ceiling_w_for_voltage`'s doc comment). `null` if `bus_v` is
+    /// unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_ceiling_w: Option<f64>,
+    /// The manual override currently in effect, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_max_w: Option<f64>,
+    /// The ceiling actually enforced by the power-target safety trip:
+    /// `min(POWER_TARGET_SAFETY_W, (override_max_w or detected_ceiling_w) - margin)`.
+    pub effective_ceiling_w: f64,
+}
+
 /// Request body for `PATCH /api/v0/boards/{name}/pause`.
 ///
 /// Goes through `board::nano3s::write_pause_command()`: pause sends an

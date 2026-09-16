@@ -863,6 +863,117 @@ fn read_power_estimate() -> (f64, f64, f64) {
     (bus_v, current_a, bus_v * current_a)
 }
 
+fn i2c_read_byte(bus: u32, addr: u32, reg: u32) -> Option<u8> {
+    let output = std::process::Command::new("i2cget")
+        .args(["-y", &bus.to_string(), &format!("0x{addr:02x}"), &format!("0x{reg:02x}")])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    if let Some(hex) = text.strip_prefix("0x") {
+        u8::from_str_radix(hex, 16).ok()
+    } else {
+        text.parse().ok()
+    }
+}
+
+const PD_I2C_ADDR: u32 = 0x42;
+
+/// HUSB238A `PD_STATUS1` (reg `0x01`) bit 6 = ATTACH -- whether a PD
+/// contract is currently established. This is the only bit read from
+/// this chip; `PD_STATUS0`'s voltage/current code nibbles are NOT
+/// decoded here -- live-verified 2026-09-16 that they read wrong for
+/// this board: `PD_STATUS0=0x40` decodes on the standard (base
+/// HUSB238) code table to 15V/0.5A, while the INA226 on the same bus
+/// simultaneously measures 27.64V/3.05A. This chip variant negotiates
+/// USB PD 3.1 EPR (28/36/48V), which uses code values the base table
+/// doesn't cover, so its raw codes are not trustworthy here -- bus
+/// voltage from the INA226 is used as the sole ground truth instead
+/// (see [`pd_ceiling_w_for_voltage`]).
+fn read_pd_attached() -> Option<bool> {
+    i2c_read_byte(POWER_I2C_BUS, PD_I2C_ADDR, 0x01).map(|v| v & 0x40 != 0)
+}
+
+/// Conservative USB-C PD power-contract ceiling, classified from
+/// measured INA226 bus voltage alone -- never from HUSB238A's own
+/// status codes (see [`read_pd_attached`]'s doc comment for why).
+/// Current is *assumed* at each voltage tier's typical/spec maximum,
+/// never measured, so this only ever misclassifies in the conservative
+/// direction (a charger that can't sustain the assumed current at a
+/// given voltage would show it as a power/voltage sag long before this
+/// classification would matter) -- it never raises the ceiling above
+/// what [`POWER_TARGET_SAFETY_W`] already validates, only ever adds a
+/// tighter cap when a weaker supply than the board's own 28V EPR
+/// design point is detected.
+///
+/// The 28V/36V/48V EPR tier is a hard USB PD 3.1 spec rule (Fixed EPR
+/// PDOs are always exactly 5A, unlike SPR tiers which vary by
+/// charger), so 140W at >=26V is not a guess. The SPR tiers below it
+/// are deliberately conservative real-world ceilings, since this board
+/// can't read the charger's actual advertised max current for those.
+fn pd_ceiling_w_for_voltage(bus_v: f64) -> f64 {
+    if bus_v >= 26.0 {
+        140.0 // 28V EPR Fixed @ 5A (spec-mandated pairing)
+    } else if bus_v >= 18.0 {
+        100.0 // 20V SPR Fixed @ 5A (common PD3.0 100W ceiling)
+    } else if bus_v >= 13.0 {
+        45.0 // 15V @ 3A
+    } else if bus_v >= 7.0 {
+        27.0 // 9V @ 3A
+    } else if bus_v > 0.0 {
+        15.0 // 5V @ 3A
+    } else {
+        f64::INFINITY // no reading -- unavailable, not "0V measured"; don't force the ceiling down on an I2C glitch
+    }
+}
+
+/// User-overridable PSU capability cap, for when auto-detection (see
+/// [`pd_ceiling_w_for_voltage`]) is unavailable or wrong for a
+/// particular charger. `None` (the default/cleared state) means "trust
+/// auto-detection." Persisted so it survives reboots, same pattern as
+/// [`TUNING_CONF_PATH`].
+const PSU_CONF_PATH: &str = "/data/userconfig/psu.conf";
+
+fn load_psu_override_w() -> Option<f64> {
+    let contents = std::fs::read_to_string(PSU_CONF_PATH).ok()?;
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("override_max_w="))
+        .and_then(|v| v.trim().parse::<f64>().ok())
+}
+
+fn write_psu_override_w(override_max_w: Option<f64>) {
+    let out = match override_max_w {
+        Some(w) => format!("override_max_w={w}\n"),
+        None => String::new(),
+    };
+    if let Err(e) = std::fs::write(PSU_CONF_PATH, out) {
+        eprintln!("[nano3s] failed to write {PSU_CONF_PATH}: {e}");
+    }
+}
+
+/// Snapshot for `GET /api/v0/boards/{name}/psu` -- a fresh on-demand
+/// read (both I2C reads, plus the persisted override file), not the
+/// worker loop's cached tick, since this endpoint is polled
+/// infrequently by the dashboard and a fresh read costs one `i2cget`
+/// round-trip either way.
+pub(crate) fn read_psu_status() -> (Option<f64>, Option<bool>, Option<f64>, Option<f64>, f64) {
+    const PD_CEILING_MARGIN_W: f64 = 10.0;
+    let (bus_v, _current_a, _power_w) = read_power_estimate();
+    let bus_v = if bus_v > 0.0 { Some(bus_v) } else { None };
+    let attached = read_pd_attached();
+    let detected_ceiling_w = bus_v.map(pd_ceiling_w_for_voltage).filter(|w| w.is_finite());
+    let override_max_w = load_psu_override_w();
+    let base_ceiling = override_max_w
+        .or(detected_ceiling_w)
+        .unwrap_or(f64::INFINITY);
+    let effective_ceiling_w = POWER_TARGET_SAFETY_W.min(base_ceiling - PD_CEILING_MARGIN_W);
+    (bus_v, attached, detected_ceiling_w, override_max_w, effective_ceiling_w)
+}
+
 /// Control file the harness (mujina_test_harness.c) polls independently
 /// of IPC to drive power_en (GPIO34) and the fan.
 const HARNESS_CONTROL_FILE: &str = "/tmp/harness_control";
@@ -1121,6 +1232,20 @@ pub(crate) fn write_temp_target_command(target_c: Option<f64>) -> std::io::Resul
             persist_tuning_clear_temp_target();
             "temp_target:off".to_string()
         }
+    };
+    std::fs::write(MUJINA_CONTROL_FILE, body)
+}
+
+/// Live-edits the manual PSU capability override -- see
+/// `pd_ceiling_w_for_voltage`'s doc comment for the auto-detection this
+/// overrides. `Some(w)` forces the PD contract ceiling used by the
+/// power-target safety trip to `w` watts (still bounded by
+/// `POWER_TARGET_SAFETY_W`, never raised above it); `None` reverts to
+/// trusting the INA226 bus-voltage classification.
+pub(crate) fn write_psu_override_command(override_max_w: Option<f64>) -> std::io::Result<()> {
+    let body = match override_max_w {
+        Some(w) => format!("psu_override:{w}"),
+        None => "psu_override:off".to_string(),
     };
     std::fs::write(MUJINA_CONTROL_FILE, body)
 }
@@ -1696,6 +1821,8 @@ fn run_worker(
     // hardcoded defaults on every reboot, a real reported bug).
     let persisted_tuning = load_tuning();
     let startup_pll_freq = persisted_tuning.pll_freq_mhz.unwrap_or(NANO3S_PLL_FREQ_TARGET);
+    let mut psu_override_max_w = load_psu_override_w();
+    let mut last_pd_ceiling_logged_w: Option<f64> = None;
 
     let rc = unsafe { nano3s_ipc_open() };
     let ipc_ok = rc == 0;
@@ -1889,6 +2016,25 @@ fn run_worker(
                     }
                 }
             }
+            Some(s) if s.starts_with("psu_override:") => {
+                let v = &s["psu_override:".len()..];
+                if v == "off" {
+                    psu_override_max_w = None;
+                    write_psu_override_w(None);
+                    last_pd_ceiling_logged_w = None;
+                    eprintln!("[nano3s] psu-override: cleared, trusting auto-detected PD ceiling");
+                } else {
+                    match v.parse::<f64>() {
+                        Ok(w) => {
+                            psu_override_max_w = Some(w);
+                            write_psu_override_w(Some(w));
+                            last_pd_ceiling_logged_w = None;
+                            eprintln!("[nano3s] psu-override: manual ceiling set to {w:.1}W via dashboard/API");
+                        }
+                        Err(_) => eprintln!("[nano3s] malformed psu_override directive: {s}"),
+                    }
+                }
+            }
             Some(s) if s.starts_with("temp_target:") => {
                 let v = &s["temp_target:".len()..];
                 if v == "off" {
@@ -2027,11 +2173,55 @@ fn run_worker(
             // comment. Safety check runs on every status refresh (~15s);
             // normal target-seeking steps are gated to
             // POWER_TARGET_CHECK_INTERVAL.
+            // Real USB-C PD contract ceiling, from the INA226 bus
+            // voltage measured just above -- see
+            // pd_ceiling_w_for_voltage's doc comment. Overridable via
+            // PSU_CONF_PATH when auto-detection is unavailable/wrong.
+            // Only ever tightens the existing POWER_TARGET_SAFETY_W
+            // trip, never loosens it.
+            const PD_CEILING_MARGIN_W: f64 = 10.0;
+            let pd_ceiling_w = psu_override_max_w
+                .unwrap_or_else(|| pd_ceiling_w_for_voltage(last_bus_v));
+            let effective_safety_w = POWER_TARGET_SAFETY_W.min(pd_ceiling_w - PD_CEILING_MARGIN_W);
+            if pd_ceiling_w.is_finite()
+                && last_pd_ceiling_logged_w != Some(pd_ceiling_w)
+                && pd_ceiling_w - PD_CEILING_MARGIN_W < POWER_TARGET_SAFETY_W
+            {
+                eprintln!(
+                    "[nano3s] PSU: bus={last_bus_v:.2}V -> detected contract ceiling={pd_ceiling_w:.0}W (below the {POWER_TARGET_SAFETY_W:.0}W design ceiling -- capping power-target safety trip to {effective_safety_w:.0}W)"
+                );
+                last_pd_ceiling_logged_w = Some(pd_ceiling_w);
+            }
+
+            // Unconditional PD-ceiling hard trip -- fires even with no
+            // power target configured (manual Live Tuning only), since a
+            // weak PSU is a hardware safety concern independent of
+            // whether the power-target loop below is in use. When a
+            // target IS set, that loop's own check against
+            // effective_safety_w already covers this tick, so this only
+            // acts when power_target_w is None to avoid double-stepping.
+            if power_target_w.is_none() && power_w > effective_safety_w {
+                let cur_mv = st.voltage_mv as i32;
+                let mut new_mv = cur_mv - POWER_TARGET_STEP_MV;
+                if new_mv == POWER_TARGET_AVOID_MV {
+                    new_mv -= POWER_TARGET_STEP_MV;
+                }
+                new_mv = new_mv.clamp(POWER_TARGET_MIN_MV, POWER_TARGET_MAX_MV);
+                if new_mv != cur_mv {
+                    eprintln!(
+                        "[nano3s] PSU safety trip: power={power_w:.1}W exceeds ceiling={effective_safety_w:.1}W (no power-target configured) cur={cur_mv}mV -> {new_mv}mV"
+                    );
+                    if let Err(e) = write_tuning_command(None, Some(new_mv as u32), None, None) {
+                        eprintln!("[nano3s] PSU safety trip: failed to write tuning command: {e}");
+                    }
+                }
+            }
+
             if let Some(target_w) = power_target_w {
                 let cur_mv = st.voltage_mv as i32;
                 let now = std::time::Instant::now();
 
-                let step = if power_w > POWER_TARGET_SAFETY_W {
+                let step = if power_w > effective_safety_w {
                     // Hard safety trip -- always allowed, ignores the
                     // interval gate.
                     Some(-POWER_TARGET_STEP_MV)
@@ -2137,20 +2327,42 @@ fn run_worker(
                             .map(|c| Temperature::from_celsius(c as f32)),
                     },
                 ];
-                t.powers = vec![PowerMeasurement {
-                    name: "core".into(),
-                    voltage_v: Some(st.voltage_mv as f32 / 1000.0),
-                    current_a: if last_current_a > 0.0 {
-                        Some(last_current_a as f32)
-                    } else {
-                        None
+                t.powers = vec![
+                    PowerMeasurement {
+                        name: "core".into(),
+                        voltage_v: Some(st.voltage_mv as f32 / 1000.0),
+                        current_a: if last_current_a > 0.0 {
+                            Some(last_current_a as f32)
+                        } else {
+                            None
+                        },
+                        power_w: if last_power_w > 0.0 {
+                            Some(last_power_w as f32)
+                        } else {
+                            None
+                        },
                     },
-                    power_w: if last_power_w > 0.0 {
-                        Some(last_power_w as f32)
-                    } else {
-                        None
+                    // Real USB-C PD input rail (INA226 bus voltage) --
+                    // distinct from "core" above, whose voltage_v is the
+                    // ASIC core rail (~3.5V) despite sharing the same
+                    // INA226 current/power reading. See
+                    // pd_ceiling_w_for_voltage's doc comment for how this
+                    // voltage is used to classify the PD contract.
+                    PowerMeasurement {
+                        name: "input".into(),
+                        voltage_v: if last_bus_v > 0.0 { Some(last_bus_v as f32) } else { None },
+                        current_a: if last_current_a > 0.0 {
+                            Some(last_current_a as f32)
+                        } else {
+                            None
+                        },
+                        power_w: if last_power_w > 0.0 {
+                            Some(last_power_w as f32)
+                        } else {
+                            None
+                        },
                     },
-                }];
+                ];
                 t.fans = read_fan_status().into_iter().collect();
             });
 

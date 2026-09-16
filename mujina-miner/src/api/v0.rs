@@ -20,7 +20,8 @@ use crate::api_client::types::{
     BoardFanRequest, BoardLedRequest, BoardLedState, BoardPauseRequest, BoardPowerTargetRequest,
     BoardTelemetry, BoardTempTargetRequest, BoardTuningRequest, FanCurvePoint, FanCurveRequest,
     FanCurveResponse, FirmwareBundleResponse, FirmwareUploadResponse, MinerPatchRequest,
-    MinerTelemetry, PoolConfigRequest, PoolConfigResponse, SourceTelemetry,
+    MinerTelemetry, PoolConfigRequest, PoolConfigResponse, PsuOverrideRequest, PsuStatusResponse,
+    SourceTelemetry,
 };
 
 /// Upper bound on a firmware upload body -- generous headroom over the
@@ -45,6 +46,7 @@ pub fn routes() -> OpenApiRouter<SharedState> {
         .routes(routes!(patch_board_tuning))
         .routes(routes!(patch_board_power_target))
         .routes(routes!(patch_board_temp_target))
+        .routes(routes!(get_board_psu, patch_board_psu))
         .routes(routes!(patch_board_fan))
         .routes(routes!(get_board_fan_curve, patch_board_fan_curve))
         .routes(routes!(patch_board_pause))
@@ -359,6 +361,106 @@ async fn patch_board_temp_target(
     #[cfg(feature = "nano3s")]
     {
         crate::board::nano3s::write_temp_target_command(req.target_c)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(StatusCode::OK)
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Read the current USB-C PD power-contract state -- live INA226 bus
+/// voltage, HUSB238A attach status, the auto-detected contract ceiling,
+/// any manual override, and the ceiling actually being enforced.
+#[utoipa::path(
+    get,
+    path = "/boards/{name}/psu",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    responses(
+        (status = OK, description = "Current PSU/PD status", body = PsuStatusResponse),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support PD detection"),
+    ),
+)]
+async fn get_board_psu(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<PsuStatusResponse>, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        let (bus_v, attached, detected_ceiling_w, override_max_w, effective_ceiling_w) =
+            crate::board::nano3s::read_psu_status();
+        Ok(Json(PsuStatusResponse {
+            bus_v,
+            attached,
+            detected_ceiling_w,
+            override_max_w,
+            effective_ceiling_w,
+        }))
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Set or clear the manual PSU power-contract override -- see
+/// `PsuOverrideRequest`'s doc comment. Only ever tightens the ceiling
+/// the power-target safety trip enforces, never loosens it.
+#[utoipa::path(
+    patch,
+    path = "/boards/{name}/psu",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    request_body = PsuOverrideRequest,
+    responses(
+        (status = OK, description = "Override updated (or cleared)"),
+        (status = BAD_REQUEST, description = "override_max_w outside the allowed range"),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support PD detection"),
+    ),
+)]
+async fn patch_board_psu(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Json(req): Json<PsuOverrideRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if let Some(w) = req.override_max_w
+        && !(15.0..=140.0).contains(&w)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        crate::board::nano3s::write_psu_override_command(req.override_max_w)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(StatusCode::OK)
     }
