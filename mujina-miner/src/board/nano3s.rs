@@ -393,12 +393,10 @@ const AUTOTUNE_ANCHORS: [(f64, [u32; 4], u32, f64); 3] = [
 /// output field is still hard-clamped to this project's own absolute
 /// validated bounds: 500MHz/domain (`patch_board_tuning`'s own
 /// validator) and `POWER_TARGET_MAX_MV` (3800mV) for frequency/voltage.
-/// `temp_limit_c` does NOT extrapolate past `level=1.0` -- it holds
-/// fixed at HIGH's own 90C rather than climbing with it, so the thermal
-/// safety ceiling never drifts upward just because the search is
-/// exploring past the last validated calibration point. Power itself is
-/// bounded separately by `effective_safety_w` in the autotune block,
-/// regardless of level.
+/// `temp_limit_c` is NOT interpolated at all -- fixed at the highest
+/// limit across `AUTOTUNE_ANCHORS` (HIGH's 90C) regardless of level, at
+/// explicit user request. Power itself is bounded separately by
+/// `effective_safety_w` in the autotune block, regardless of level.
 fn level_to_freq_voltage_limit(level: f64) -> ([u32; 4], u32, f64) {
     let level = level.max(0.0);
     let (lo, hi) = if level <= 0.5 {
@@ -406,8 +404,8 @@ fn level_to_freq_voltage_limit(level: f64) -> ([u32; 4], u32, f64) {
     } else {
         (AUTOTUNE_ANCHORS[1], AUTOTUNE_ANCHORS[2])
     };
-    let (lo_level, lo_freq, lo_volt, lo_limit) = lo;
-    let (hi_level, hi_freq, hi_volt, hi_limit) = hi;
+    let (lo_level, lo_freq, lo_volt, _lo_limit) = lo;
+    let (hi_level, hi_freq, hi_volt, _hi_limit) = hi;
     let span = hi_level - lo_level;
     // frac can exceed 1.0 when level > 1.0 -- deliberate extrapolation,
     // bounded by the per-field clamps below rather than by frac itself.
@@ -436,11 +434,7 @@ fn level_to_freq_voltage_limit(level: f64) -> ([u32; 4], u32, f64) {
     }
     volt_mv = volt_mv.clamp(POWER_TARGET_MIN_MV, POWER_TARGET_MAX_MV);
 
-    let limit_c = if level <= 1.0 {
-        lo_limit + frac * (hi_limit - lo_limit)
-    } else {
-        hi_limit
-    };
+    let limit_c = AUTOTUNE_ANCHORS[2].3;
     (freq, volt_mv as u32, limit_c)
 }
 
