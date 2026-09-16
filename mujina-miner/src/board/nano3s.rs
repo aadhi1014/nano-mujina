@@ -342,13 +342,16 @@ const TEMP_TARGET_MIN_MHZ: u32 = 100;
 /// interpolation between MED's 3496mV and HIGH's 3704mV would otherwise
 /// cross exactly through it) and quantizing to the real 26mV step grid.
 ///
-/// Step size chosen to traverse the full LOW-HIGH range in about
-/// AUTOTUNE_ANCHORS.len() minus one) * (338-210)/AUTOTUNE_LEVEL_STEP
-/// ticks at AUTOTUNE_CHECK_INTERVAL cadence -- deliberately gradual,
-/// same settling rationale as POWER_TARGET_CHECK_INTERVAL /
-/// PSU_FREQ_CHECK_INTERVAL (a tick judged against the effect of the
-/// step just taken chases its own tail instead of converging).
-const AUTOTUNE_LEVEL_STEP: f64 = 0.05;
+/// Step size/cadence trade gradualness for speed -- the settling
+/// rationale from POWER_TARGET_CHECK_INTERVAL/PSU_FREQ_CHECK_INTERVAL
+/// (a tick judged against the effect of the step just taken chases its
+/// own tail) still applies, but hashrate is a direct nonce count rather
+/// than the SmartSpeed-accumulated stat those two are gated around, so
+/// there's more room to move: step size raised from an initial 0.05 to
+/// 0.15 and the interval trimmed from 150s to 90s at explicit user
+/// request ("make it climb faster") once the original conservative
+/// values were live-verified to converge safely with no oscillation.
+const AUTOTUNE_LEVEL_STEP: f64 = 0.15;
 /// How far past HIGH (level=1.0) the search is allowed to extrapolate,
 /// at explicit user request ("go above HIGH as long as power stays
 /// under 137W") -- a generous backstop against unbounded growth, not
@@ -357,7 +360,7 @@ const AUTOTUNE_LEVEL_STEP: f64 = 0.05;
 /// well before this at roughly level~=1.12-1.15, and the power/temp
 /// hard safety checks apply at every level regardless of range.
 const AUTOTUNE_LEVEL_MAX: f64 = 2.0;
-const AUTOTUNE_CHECK_INTERVAL: Duration = Duration::from_secs(150);
+const AUTOTUNE_CHECK_INTERVAL: Duration = Duration::from_secs(90);
 /// Below-target dead-band -- steps up promptly, since under-target is
 /// the "not doing the job" direction.
 const AUTOTUNE_HASHRATE_DEADBAND_THS: f64 = 0.15;
@@ -2091,11 +2094,26 @@ fn run_worker(
     // (see the match arm below and `write_power_target_command()`/
     // `PATCH /api/v0/boards/{name}/power-target`). `None` means the
     // feature is off.
-    let mut power_target_w: Option<f64> = persisted_tuning.power_target_w.or_else(|| {
-        std::env::var("MUJINA_NANO3S_POWER_TARGET_W")
-            .ok()
-            .and_then(|s| s.trim().parse::<f64>().ok())
-    });
+    // Autotune owns frequency+voltage when enabled -- power_target_w
+    // must resolve to None at startup, full stop, not just when its own
+    // persisted field is empty. Live-verified 2026-09-16 that skipping
+    // this check let the MUJINA_NANO3S_POWER_TARGET_W env var fallback
+    // (a stale 62W default baked into the startup script from much
+    // earlier work) silently wake the power-target loop anyway even
+    // though the persisted field itself was correctly cleared -- its
+    // own internal voltage step then wrote a `tune:` directive that
+    // disabled autotune as a side effect (same failure class as the
+    // persisted-field version of this bug, fixed the same day, via a
+    // path that fix didn't close).
+    let mut power_target_w: Option<f64> = if persisted_tuning.autotune_hashrate_target_ths.is_some() {
+        None
+    } else {
+        persisted_tuning.power_target_w.or_else(|| {
+            std::env::var("MUJINA_NANO3S_POWER_TARGET_W")
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok())
+        })
+    };
     let mut next_power_check = std::time::Instant::now() + POWER_TARGET_CHECK_INTERVAL;
     // `resume_from_idle()` re-powers and re-enumerates the chain, which
     // lands back at rtos_core's ~100MHz cold bring-up default. Track what
@@ -2106,7 +2124,15 @@ fn run_worker(
     let mut last_applied_voltage_mv: Option<i32> = persisted_tuning.voltage_mv.map(|v| v as i32);
     // Temp-target PLL throttle -- see TEMP_TARGET_DEADBAND_C's doc comment.
     // `None` means the feature is off (no automatic frequency changes).
-    let mut temp_target_c: Option<f64> = persisted_tuning.temp_target_c;
+    // Same "autotune wins at startup, full stop" guard as power_target_w
+    // above -- no env var fallback exists for this one today, but this
+    // keeps the invariant explicit rather than relying on that being
+    // true forever.
+    let mut temp_target_c: Option<f64> = if persisted_tuning.autotune_hashrate_target_ths.is_some() {
+        None
+    } else {
+        persisted_tuning.temp_target_c
+    };
     // The ceiling the throttle recovers back up to -- the last frequency
     // actually *commanded* (dashboard/API `tune:`, not the throttle's own
     // steps, and now also a persisted value from a previous boot), so
