@@ -17,11 +17,11 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::commands::SchedulerCommand;
 use super::server::SharedState;
 use crate::api_client::types::{
-    BoardFanRequest, BoardLedRequest, BoardLedState, BoardPauseRequest, BoardPowerTargetRequest,
-    BoardTelemetry, BoardTempTargetRequest, BoardTuningRequest, FanCurvePoint, FanCurveRequest,
-    FanCurveResponse, FirmwareBundleResponse, FirmwareUploadResponse, MinerPatchRequest,
-    MinerTelemetry, PoolConfigRequest, PoolConfigResponse, PsuOverrideRequest, PsuStatusResponse,
-    SourceTelemetry,
+    AutotuneHashrateRequest, AutotuneHashrateResponse, BoardFanRequest, BoardLedRequest,
+    BoardLedState, BoardPauseRequest, BoardPowerTargetRequest, BoardTelemetry,
+    BoardTempTargetRequest, BoardTuningRequest, FanCurvePoint, FanCurveRequest, FanCurveResponse,
+    FirmwareBundleResponse, FirmwareUploadResponse, MinerPatchRequest, MinerTelemetry,
+    PoolConfigRequest, PoolConfigResponse, PsuOverrideRequest, PsuStatusResponse, SourceTelemetry,
 };
 
 /// Upper bound on a firmware upload body -- generous headroom over the
@@ -47,6 +47,7 @@ pub fn routes() -> OpenApiRouter<SharedState> {
         .routes(routes!(patch_board_power_target))
         .routes(routes!(patch_board_temp_target))
         .routes(routes!(get_board_psu, patch_board_psu))
+        .routes(routes!(get_board_autotune_hashrate, patch_board_autotune_hashrate))
         .routes(routes!(patch_board_fan))
         .routes(routes!(get_board_fan_curve, patch_board_fan_curve))
         .routes(routes!(patch_board_pause))
@@ -461,6 +462,107 @@ async fn patch_board_psu(
     #[cfg(feature = "nano3s")]
     {
         crate::board::nano3s::write_psu_override_command(req.override_max_w)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(StatusCode::OK)
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Read the current hashrate-mode autotune state.
+#[utoipa::path(
+    get,
+    path = "/boards/{name}/autotune-hashrate",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    responses(
+        (status = OK, description = "Current autotune state", body = AutotuneHashrateResponse),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support autotune"),
+    ),
+)]
+async fn get_board_autotune_hashrate(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<AutotuneHashrateResponse>, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        let (enabled, target_ths, level, level_freq_mhz, level_voltage_mv) =
+            crate::board::nano3s::read_autotune_hashrate_status();
+        Ok(Json(AutotuneHashrateResponse {
+            enabled,
+            target_ths,
+            level,
+            level_freq_mhz,
+            level_voltage_mv,
+        }))
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Enable/edit/disable hashrate-mode autotune -- see
+/// `AutotuneHashrateRequest`'s doc comment.
+#[utoipa::path(
+    patch,
+    path = "/boards/{name}/autotune-hashrate",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    request_body = AutotuneHashrateRequest,
+    responses(
+        (status = OK, description = "Autotune target updated (or disabled)"),
+        (status = BAD_REQUEST, description = "target_ths outside a plausible range"),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support autotune"),
+    ),
+)]
+async fn patch_board_autotune_hashrate(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Json(req): Json<AutotuneHashrateRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // This board's real range is roughly 0.5-6 TH/s across LOW-HIGH;
+    // generous headroom either side to allow testing/future hardware,
+    // but reject an obviously wrong value (e.g. a watts figure typed
+    // into the wrong field).
+    if let Some(t) = req.target_ths
+        && !(0.1..=20.0).contains(&t)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        crate::board::nano3s::write_autotune_hashrate_command(req.target_ths)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         Ok(StatusCode::OK)
     }

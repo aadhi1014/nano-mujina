@@ -237,6 +237,35 @@ pub struct PsuStatusResponse {
     pub effective_ceiling_w: f64,
 }
 
+/// Request body for `PATCH /api/v0/boards/{name}/autotune-hashrate`.
+///
+/// Enables/edits hashrate-mode autotune: searches frequency+voltage
+/// (interpolated between the LOW/MED/HIGH calibration points) for the
+/// lowest-power combination that reliably sustains `target_ths`.
+/// `target_ths: null`/absent disables it and leaves frequency/voltage
+/// wherever they last were. Mutually exclusive with power-target/
+/// temp-target -- enabling this disables both; a manual tuning command
+/// disables this in turn.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct AutotuneHashrateRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_ths: Option<f64>,
+}
+
+/// Response body for `GET /api/v0/boards/{name}/autotune-hashrate`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct AutotuneHashrateResponse {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_ths: Option<f64>,
+    /// Current search position, 0.0 (LOW) to 1.0 (HIGH).
+    pub level: f64,
+    /// PLL frequency this level currently maps to (domain 0).
+    pub level_freq_mhz: u32,
+    /// Core voltage this level currently maps to.
+    pub level_voltage_mv: u32,
+}
+
 /// Request body for `PATCH /api/v0/boards/{name}/pause`.
 ///
 /// Goes through `board::nano3s::write_pause_command()`: pause sends an

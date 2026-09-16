@@ -325,6 +325,125 @@ const TEMP_TARGET_EMERGENCY_STEP_MHZ: i32 = 30;
 /// Matches the frequency floor `patch_board_tuning` already validates.
 const TEMP_TARGET_MIN_MHZ: u32 = 100;
 
+/// Hashrate-mode autotune: given a target TH/s (`autotune_hashrate_target_ths`
+/// local var below, unset = feature off), searches for the lowest-power
+/// frequency/voltage combination that reliably sustains it, taking over
+/// both frequency and voltage (power-target/temp-target go idle while
+/// this runs -- see the `autotune_hashrate:` match arm).
+///
+/// The search is a single scalar "level" in `[0.0, 1.0]`
+/// (0.0=LOW/0.5=MED/1.0=HIGH), linearly interpolated between the three
+/// real calibrated anchor points from `hashrate_cali.ini` (see
+/// `AUTOTUNE_ANCHORS`) rather than independently searching frequency
+/// and voltage -- every point the search can land on is a blend of
+/// already-validated operating points, never a wild, untested
+/// combination. `level_to_freq_voltage_limit()` does the interpolation,
+/// including skipping `POWER_TARGET_AVOID_MV` (straight-line
+/// interpolation between MED's 3496mV and HIGH's 3704mV would otherwise
+/// cross exactly through it) and quantizing to the real 26mV step grid.
+///
+/// Step size chosen to traverse the full LOW-HIGH range in about
+/// AUTOTUNE_ANCHORS.len() minus one) * (338-210)/AUTOTUNE_LEVEL_STEP
+/// ticks at AUTOTUNE_CHECK_INTERVAL cadence -- deliberately gradual,
+/// same settling rationale as POWER_TARGET_CHECK_INTERVAL /
+/// PSU_FREQ_CHECK_INTERVAL (a tick judged against the effect of the
+/// step just taken chases its own tail instead of converging).
+const AUTOTUNE_LEVEL_STEP: f64 = 0.05;
+/// How far past HIGH (level=1.0) the search is allowed to extrapolate,
+/// at explicit user request ("go above HIGH as long as power stays
+/// under 137W") -- a generous backstop against unbounded growth, not
+/// the real limiting factor: `level_to_freq_voltage_limit`'s own
+/// per-field clamps (500MHz/domain, 3800mV) saturate the useful range
+/// well before this at roughly level~=1.12-1.15, and the power/temp
+/// hard safety checks apply at every level regardless of range.
+const AUTOTUNE_LEVEL_MAX: f64 = 2.0;
+const AUTOTUNE_CHECK_INTERVAL: Duration = Duration::from_secs(150);
+/// Below-target dead-band -- steps up promptly, since under-target is
+/// the "not doing the job" direction.
+const AUTOTUNE_HASHRATE_DEADBAND_THS: f64 = 0.15;
+/// Above-target dead-band before a down-step is even considered --
+/// deliberately wider than the up dead-band. Hashrate is noisy
+/// (pool-difficulty/share-timing driven, not a smooth signal like power
+/// or temperature), so a symmetric band here would walk the level up
+/// and down forever chasing noise.
+const AUTOTUNE_HASHRATE_DEADBAND_ABOVE_THS: f64 = 0.30;
+/// Consecutive over-target ticks required before actually stepping
+/// down, on top of the wider dead-band above -- the second half of the
+/// same anti-oscillation guard.
+const AUTOTUNE_HASHRATE_DOWN_CONFIRM_TICKS: u32 = 3;
+
+/// `(level, pll_freq_mhz, voltage_mv, temp_limit_c)` calibration anchors
+/// from `/data/factory/hashrate_cali.ini` -- LOW/MED/HIGH, the same
+/// three real validated operating points every other feature in this
+/// file (temp-target's recovery ceiling, the power-target voltage
+/// range) is ultimately anchored to.
+const AUTOTUNE_ANCHORS: [(f64, [u32; 4], u32, f64); 3] = [
+    (0.0, [210, 230, 250, 270], 3392, 80.0),
+    (0.5, [338, 358, 378, 398], 3496, 85.0),
+    (1.0, [420, 440, 460, 480], 3704, 90.0),
+];
+
+/// Interpolates `(pll_freq_mhz, voltage_mv, temp_limit_c)` for a given
+/// autotune level -- see `AUTOTUNE_LEVEL_STEP`'s doc comment for why
+/// this is the whole search space rather than two independent axes.
+///
+/// `level > 1.0` (past HIGH) is allowed, at explicit user request
+/// ("go above HIGH as long as power stays under 137W") -- continues the
+/// same MED->HIGH slope rather than refusing to extrapolate, but every
+/// output field is still hard-clamped to this project's own absolute
+/// validated bounds: 500MHz/domain (`patch_board_tuning`'s own
+/// validator) and `POWER_TARGET_MAX_MV` (3800mV) for frequency/voltage.
+/// `temp_limit_c` does NOT extrapolate past `level=1.0` -- it holds
+/// fixed at HIGH's own 90C rather than climbing with it, so the thermal
+/// safety ceiling never drifts upward just because the search is
+/// exploring past the last validated calibration point. Power itself is
+/// bounded separately by `effective_safety_w` in the autotune block,
+/// regardless of level.
+fn level_to_freq_voltage_limit(level: f64) -> ([u32; 4], u32, f64) {
+    let level = level.max(0.0);
+    let (lo, hi) = if level <= 0.5 {
+        (AUTOTUNE_ANCHORS[0], AUTOTUNE_ANCHORS[1])
+    } else {
+        (AUTOTUNE_ANCHORS[1], AUTOTUNE_ANCHORS[2])
+    };
+    let (lo_level, lo_freq, lo_volt, lo_limit) = lo;
+    let (hi_level, hi_freq, hi_volt, hi_limit) = hi;
+    let span = hi_level - lo_level;
+    // frac can exceed 1.0 when level > 1.0 -- deliberate extrapolation,
+    // bounded by the per-field clamps below rather than by frac itself.
+    let frac = if span > 0.0 { (level - lo_level) / span } else { 0.0 };
+
+    // Interpolate/extrapolate the base domain only, then rebuild the
+    // other three with the fixed +20MHz-per-domain spacing every
+    // calibration anchor shares -- keeps every generated point
+    // non-decreasing across domains, which `patch_board_tuning`'s own
+    // validator requires, rather than risking independent per-domain
+    // rounding drift. Clamped to 440 so domain3 (base+60) never exceeds
+    // the 500MHz/domain absolute ceiling.
+    let base = (lo_freq[0] as f64 + frac * (hi_freq[0] as f64 - lo_freq[0] as f64)).round() as i32;
+    let base = base.clamp(TEMP_TARGET_MIN_MHZ as i32, 440);
+    let freq = [base as u32, (base + 20) as u32, (base + 40) as u32, (base + 60) as u32];
+
+    let volt_f = lo_volt as f64 + frac * (hi_volt as f64 - lo_volt as f64);
+    let steps = (volt_f / POWER_TARGET_STEP_MV as f64).round() as i32;
+    let mut volt_mv = steps * POWER_TARGET_STEP_MV;
+    if volt_mv == POWER_TARGET_AVOID_MV {
+        // Straight-line interpolation between MED (3496mV) and HIGH
+        // (3704mV) passes through 3600mV -- the documented core-domain
+        // migration-collapse voltage POWER_TARGET_AVOID_MV exists to
+        // dodge. Step one grid unit further in the direction of travel.
+        volt_mv += if frac >= 0.5 { POWER_TARGET_STEP_MV } else { -POWER_TARGET_STEP_MV };
+    }
+    volt_mv = volt_mv.clamp(POWER_TARGET_MIN_MV, POWER_TARGET_MAX_MV);
+
+    let limit_c = if level <= 1.0 {
+        lo_limit + frac * (hi_limit - lo_limit)
+    } else {
+        hi_limit
+    };
+    (freq, volt_mv as u32, limit_c)
+}
+
 /// Builds the 8 AsicBoost version-rolling candidates for a job's mid_id
 /// slots. `set_vmask()`-equivalent: candidate list is
 /// `[0, full_mask, individual_bit_15, individual_bit_16, ...,
@@ -1002,6 +1121,17 @@ pub(crate) fn read_psu_status() -> (Option<f64>, Option<bool>, Option<f64>, Opti
     (bus_v, attached, detected_ceiling_w, override_max_w, effective_ceiling_w)
 }
 
+/// Snapshot for `GET /api/v0/boards/{name}/autotune-hashrate` -- reads
+/// fresh from `TUNING_CONF_PATH` rather than the worker loop's own
+/// state, same reasoning as `read_psu_status`.
+pub(crate) fn read_autotune_hashrate_status() -> (bool, Option<f64>, f64, u32, u32) {
+    let cfg = load_tuning();
+    let enabled = cfg.autotune_hashrate_target_ths.is_some();
+    let level = cfg.autotune_level.unwrap_or(0.5);
+    let (freq, volt, _) = level_to_freq_voltage_limit(level);
+    (enabled, cfg.autotune_hashrate_target_ths, level, freq[0], volt)
+}
+
 /// Control file the harness (mujina_test_harness.c) polls independently
 /// of IPC to drive power_en (GPIO34) and the fan.
 const HARNESS_CONTROL_FILE: &str = "/tmp/harness_control";
@@ -1089,6 +1219,14 @@ struct PersistedTuning {
     voltage_mv: Option<u32>,
     power_target_w: Option<f64>,
     temp_target_c: Option<f64>,
+    /// Hashrate-mode autotune target, TH/s. `Some` means the autotuner
+    /// owns frequency+voltage (power-target/temp-target go idle while
+    /// this is set) -- see AUTOTUNE_LEVEL_STEP's doc comment.
+    autotune_hashrate_target_ths: Option<f64>,
+    /// The autotuner's own search state (0.0=LOW..1.0=HIGH), so a reboot
+    /// resumes searching from where it left off instead of restarting
+    /// from the middle.
+    autotune_level: Option<f64>,
 }
 
 /// Reads [`TUNING_CONF_PATH`], or all-`None` if missing/unparseable --
@@ -1116,6 +1254,10 @@ fn load_tuning() -> PersistedTuning {
             "voltage_mv" => cfg.voltage_mv = value.parse::<u32>().ok(),
             "power_target_w" => cfg.power_target_w = value.parse::<f64>().ok(),
             "temp_target_c" => cfg.temp_target_c = value.parse::<f64>().ok(),
+            "autotune_hashrate_target_ths" => {
+                cfg.autotune_hashrate_target_ths = value.parse::<f64>().ok()
+            }
+            "autotune_level" => cfg.autotune_level = value.parse::<f64>().ok(),
             _ => {}
         }
     }
@@ -1138,6 +1280,12 @@ fn write_tuning_conf(cfg: &PersistedTuning) {
     }
     if let Some(t) = cfg.temp_target_c {
         out.push_str(&format!("temp_target_c={t}\n"));
+    }
+    if let Some(t) = cfg.autotune_hashrate_target_ths {
+        out.push_str(&format!("autotune_hashrate_target_ths={t}\n"));
+    }
+    if let Some(l) = cfg.autotune_level {
+        out.push_str(&format!("autotune_level={l}\n"));
     }
     if let Err(e) = std::fs::write(TUNING_CONF_PATH, out) {
         eprintln!("[nano3s] failed to write {TUNING_CONF_PATH}: {e}");
@@ -1183,6 +1331,26 @@ fn persist_tuning_clear_power_target() {
 fn persist_tuning_clear_temp_target() {
     let mut cfg = load_tuning();
     cfg.temp_target_c = None;
+    write_tuning_conf(&cfg);
+}
+
+/// `Some(target_ths)` enables hashrate-mode autotune and resets its
+/// search state to start from MED (`level=0.5`); `None` disables it,
+/// leaving `autotune_level` (and the freq/voltage it last applied)
+/// untouched, same "leaves things wherever they were" convention as
+/// `persist_tuning_clear_temp_target`.
+fn persist_autotune_hashrate_target(target_ths: Option<f64>) {
+    let mut cfg = load_tuning();
+    cfg.autotune_hashrate_target_ths = target_ths;
+    if target_ths.is_some() {
+        cfg.autotune_level = Some(0.5);
+    }
+    write_tuning_conf(&cfg);
+}
+
+fn persist_autotune_level(level: f64) {
+    let mut cfg = load_tuning();
+    cfg.autotune_level = Some(level);
     write_tuning_conf(&cfg);
 }
 
@@ -1259,6 +1427,27 @@ pub(crate) fn write_temp_target_command(target_c: Option<f64>) -> std::io::Resul
         None => {
             persist_tuning_clear_temp_target();
             "temp_target:off".to_string()
+        }
+    };
+    std::fs::write(MUJINA_CONTROL_FILE, body)
+}
+
+/// Live-edits hashrate-mode autotune -- see `AUTOTUNE_LEVEL_STEP`'s doc
+/// comment for the full search design. `Some(target_ths)` enables it
+/// (taking over frequency+voltage; power-target/temp-target go idle
+/// while it's active -- both auto-disabled here, and re-enabling either
+/// of those disables autotune, see the match arms in `run_worker()`);
+/// `None` disables it and leaves frequency/voltage wherever they last
+/// were, same convention as `write_temp_target_command(None)`.
+pub(crate) fn write_autotune_hashrate_command(target_ths: Option<f64>) -> std::io::Result<()> {
+    let body = match target_ths {
+        Some(t) => {
+            persist_autotune_hashrate_target(Some(t));
+            format!("autotune_hashrate:{t}")
+        }
+        None => {
+            persist_autotune_hashrate_target(None);
+            "autotune_hashrate:off".to_string()
         }
     };
     std::fs::write(MUJINA_CONTROL_FILE, body)
@@ -1930,13 +2119,33 @@ fn run_worker(
     // throttling down and back up never overshoots what the user asked
     // for. Updated only in the `tune:` match arm below, deliberately
     // never by the throttle block itself.
-    let mut temp_throttle_base_freq: [u32; 4] = startup_pll_freq;
+    // If autotune was already enabled before this boot, its own valid
+    // range (not whatever frequency happened to be persisted) is the
+    // real ceiling -- see the autotune_hashrate: match arm's identical
+    // reasoning for why this must not be limited to a stale manual
+    // ceiling.
+    let mut temp_throttle_base_freq: [u32; 4] = if persisted_tuning.autotune_hashrate_target_ths.is_some() {
+        AUTOTUNE_ANCHORS[2].1
+    } else {
+        startup_pll_freq
+    };
     // PSU power-ceiling's own frequency floor -- see its block below for
     // the full design. Starts unrestricted (equal to the commanded
     // ceiling) and only ever tightens when voltage-only stepping has
     // bottomed out and power still exceeds the PD-detected ceiling.
-    let mut psu_ceiling_freq: [u32; 4] = startup_pll_freq;
+    let mut psu_ceiling_freq: [u32; 4] = temp_throttle_base_freq;
     let mut next_psu_freq_check = std::time::Instant::now() + PSU_FREQ_CHECK_INTERVAL;
+    // Hashrate-mode autotune -- see AUTOTUNE_LEVEL_STEP's doc comment.
+    // `Some` means it owns frequency+voltage; power-target/temp-target
+    // are force-disabled whenever this is set (see the
+    // `autotune_hashrate:` match arm), and a manual `tune:`/
+    // `power_target:`/`temp_target:` command disables this in turn (see
+    // those match arms) -- exactly one of {autotune, power-target +
+    // temp-target} ever actively drives frequency/voltage at a time.
+    let mut autotune_hashrate_target_ths: Option<f64> = persisted_tuning.autotune_hashrate_target_ths;
+    let mut autotune_level: f64 = persisted_tuning.autotune_level.unwrap_or(0.5);
+    let mut next_autotune_check = std::time::Instant::now() + AUTOTUNE_CHECK_INTERVAL;
+    let mut autotune_over_ticks: u32 = 0;
 
     loop {
         // Poll for an external pause/resume via MUJINA_CONTROL_FILE,
@@ -1972,6 +2181,14 @@ fn run_worker(
                 eprintln!("[nano3s] manual RESUME via {MUJINA_CONTROL_FILE} (reapplied pll_freq={last_applied_pll_freq:?} voltage_mv={last_applied_voltage_mv:?})");
             }
             Some(s) if s.starts_with("tune:") => {
+                // A manual command always wins over the autotuner --
+                // same "explicit action overrides automatic" precedent
+                // as the Fan Control card's manual/auto split.
+                if autotune_hashrate_target_ths.is_some() {
+                    autotune_hashrate_target_ths = None;
+                    persist_autotune_hashrate_target(None);
+                    eprintln!("[nano3s] autotune: disabled by manual tune command");
+                }
                 // See write_tuning_command()'s doc comment for the exact
                 // "always 7 fields" wire format this expects.
                 let fields: Vec<&str> = s["tune:".len()..].split(',').collect();
@@ -2040,6 +2257,11 @@ fn run_worker(
                 } else {
                     match v.parse::<f64>() {
                         Ok(w) => {
+                            if autotune_hashrate_target_ths.is_some() {
+                                autotune_hashrate_target_ths = None;
+                                persist_autotune_hashrate_target(None);
+                                eprintln!("[nano3s] autotune: disabled by manual power-target command");
+                            }
                             power_target_w = Some(w);
                             // Act on the new target at the next check
                             // rather than waiting out the old interval.
@@ -2077,10 +2299,59 @@ fn run_worker(
                 } else {
                     match v.parse::<f64>() {
                         Ok(c) => {
+                            if autotune_hashrate_target_ths.is_some() {
+                                autotune_hashrate_target_ths = None;
+                                persist_autotune_hashrate_target(None);
+                                eprintln!("[nano3s] autotune: disabled by manual temp-target command");
+                            }
                             temp_target_c = Some(c);
                             eprintln!("[nano3s] temp-target: live target set to {c:.1}C via dashboard/API");
                         }
                         Err(_) => eprintln!("[nano3s] malformed temp_target directive: {s}"),
+                    }
+                }
+            }
+            Some(s) if s.starts_with("autotune_hashrate:") => {
+                let v = &s["autotune_hashrate:".len()..];
+                if v == "off" {
+                    autotune_hashrate_target_ths = None;
+                    persist_autotune_hashrate_target(None);
+                    eprintln!("[nano3s] autotune: disabled via dashboard/API");
+                } else {
+                    match v.parse::<f64>() {
+                        Ok(t) => {
+                            // Autotune owns frequency+voltage -- disable
+                            // the other two loops so they don't fight
+                            // over the same actuators. Persisted too
+                            // (not just the local vars) -- live-verified
+                            // 2026-09-16 that leaving power_target_w
+                            // persisted let a reboot resurrect it
+                            // alongside autotune, whose own internal
+                            // voltage step then wrote a `tune:` directive
+                            // that the manual-command guard mistook for
+                            // a real user command and used to disable
+                            // autotune again.
+                            power_target_w = None;
+                            temp_target_c = None;
+                            persist_tuning_clear_power_target();
+                            persist_tuning_clear_temp_target();
+                            autotune_hashrate_target_ths = Some(t);
+                            autotune_level = 0.5;
+                            autotune_over_ticks = 0;
+                            next_autotune_check = std::time::Instant::now();
+                            // psu_ceiling_freq's own recovery is bounded
+                            // by temp_throttle_base_freq (see that
+                            // block's doc comment) -- raise it to
+                            // autotune's own full range so a stale
+                            // manual-command ceiling (e.g. MED's 338MHz)
+                            // can't silently prevent the search from
+                            // ever reaching HIGH.
+                            temp_throttle_base_freq = AUTOTUNE_ANCHORS[2].1;
+                            eprintln!(
+                                "[nano3s] autotune: hashrate target set to {t:.2} TH/s via dashboard/API (power-target/temp-target disabled)"
+                            );
+                        }
+                        Err(_) => eprintln!("[nano3s] malformed autotune_hashrate directive: {s}"),
                     }
                 }
             }
@@ -2233,7 +2504,12 @@ fn run_worker(
             // target IS set, that loop's own check against
             // effective_safety_w already covers this tick, so this only
             // acts when power_target_w is None to avoid double-stepping.
-            if power_target_w.is_none() && power_w > effective_safety_w {
+            // Also skipped while autotune owns voltage -- its own block
+            // below applies the same effective_safety_w check directly
+            // via IPC, and this one writes voltage through a different
+            // path (write_tuning_command's control-file round-trip)
+            // that would otherwise race it.
+            if power_target_w.is_none() && autotune_hashrate_target_ths.is_none() && power_w > effective_safety_w {
                 let cur_mv = st.voltage_mv as i32;
                 let mut new_mv = cur_mv - POWER_TARGET_STEP_MV;
                 if new_mv == POWER_TARGET_AVOID_MV {
@@ -2387,23 +2663,109 @@ fn run_worker(
                 }
             }
 
+            // Hashrate-mode autotune -- see AUTOTUNE_LEVEL_STEP's doc
+            // comment for the full search design. Mutually exclusive
+            // with power-target/temp-target (both force-disabled when
+            // this is enabled -- see the autotune_hashrate: match arm,
+            // and manual tune:/power_target:/temp_target: commands
+            // disable this in turn), but still respects the PSU
+            // frequency ceiling via the combined apply below, and its
+            // own hard safety checks (the device's effective power
+            // ceiling, and this level's own interpolated temp limit)
+            // always override its search direction.
+            let mut autotune_candidate: Option<[u32; 4]> = None;
+            if let Some(target_ths) = autotune_hashrate_target_ths {
+                let (_, _, limit_c) = level_to_freq_voltage_limit(autotune_level);
+                let temp_max = st.temp_max as f64;
+                let now = std::time::Instant::now();
+
+                let forced_down = if power_w > effective_safety_w {
+                    autotune_level = (autotune_level - AUTOTUNE_LEVEL_STEP).max(0.0);
+                    eprintln!(
+                        "[nano3s] autotune: power={power_w:.1}W exceeds {effective_safety_w:.1}W ceiling -- level -> {autotune_level:.2}"
+                    );
+                    true
+                } else if temp_max > 0.0 && temp_max >= limit_c {
+                    autotune_level = (autotune_level - AUTOTUNE_LEVEL_STEP).max(0.0);
+                    eprintln!(
+                        "[nano3s] autotune: temp_max={temp_max:.1}C exceeds this level's {limit_c:.1}C limit -- level -> {autotune_level:.2}"
+                    );
+                    true
+                } else {
+                    false
+                };
+
+                if forced_down {
+                    next_autotune_check = now + AUTOTUNE_CHECK_INTERVAL;
+                    persist_autotune_level(autotune_level);
+                } else if now >= next_autotune_check {
+                    let current_ths = st.ghsmm as f64 / 1000.0;
+                    if current_ths < target_ths - AUTOTUNE_HASHRATE_DEADBAND_THS {
+                        autotune_level = (autotune_level + AUTOTUNE_LEVEL_STEP).min(AUTOTUNE_LEVEL_MAX);
+                        autotune_over_ticks = 0;
+                        eprintln!(
+                            "[nano3s] autotune: hashrate={current_ths:.2}TH/s under target={target_ths:.2}TH/s -- level -> {autotune_level:.2}"
+                        );
+                        persist_autotune_level(autotune_level);
+                    } else if current_ths > target_ths + AUTOTUNE_HASHRATE_DEADBAND_ABOVE_THS {
+                        autotune_over_ticks += 1;
+                        if autotune_over_ticks >= AUTOTUNE_HASHRATE_DOWN_CONFIRM_TICKS {
+                            autotune_level = (autotune_level - AUTOTUNE_LEVEL_STEP).max(0.0);
+                            autotune_over_ticks = 0;
+                            eprintln!(
+                                "[nano3s] autotune: hashrate={current_ths:.2}TH/s comfortably over target={target_ths:.2}TH/s for {AUTOTUNE_HASHRATE_DOWN_CONFIRM_TICKS} ticks -- level -> {autotune_level:.2}"
+                            );
+                            persist_autotune_level(autotune_level);
+                        }
+                    } else {
+                        autotune_over_ticks = 0;
+                    }
+                    next_autotune_check = now + AUTOTUNE_CHECK_INTERVAL;
+                }
+
+                let (mut new_freq, new_volt, _) = level_to_freq_voltage_limit(autotune_level);
+                // Clamp against psu_ceiling_freq directly rather than
+                // relying on the fold below to catch it via
+                // psu_candidate -- psu_candidate only fires (Some) when
+                // it differs from last_applied_pll_freq, so if autotune
+                // jumps straight past a ceiling that last_applied_pll_freq
+                // hadn't reached yet, psu_candidate would stay None and
+                // silently fail to constrain it.
+                for i in 0..4 {
+                    new_freq[i] = new_freq[i].min(psu_ceiling_freq[i]);
+                }
+                if new_freq != last_applied_pll_freq {
+                    autotune_candidate = Some(new_freq);
+                }
+                if Some(new_volt as i32) != last_applied_voltage_mv {
+                    let rc = unsafe { nano3s_ipc_set_voltage_raw(new_volt as i32) };
+                    if rc != 0 {
+                        eprintln!("[nano3s] autotune: nano3s_ipc_set_voltage_raw failed");
+                    } else {
+                        last_applied_voltage_mv = Some(new_volt as i32);
+                    }
+                }
+            }
+
             // Combined apply -- elementwise min of whichever candidate(s)
             // fired this tick (a throttle that didn't fire this tick
             // contributes no constraint here, since its own state --
             // temp_throttle_base_freq / psu_ceiling_freq -- already
             // carries forward independently for next tick).
-            let combined = match (temp_candidate, psu_candidate) {
-                (Some(a), Some(b)) => {
-                    let mut m = a;
-                    for i in 0..4 {
-                        m[i] = m[i].min(b[i]);
-                    }
-                    Some(m)
-                }
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            let combined = [temp_candidate, psu_candidate, autotune_candidate]
+                .into_iter()
+                .flatten()
+                .fold(None::<[u32; 4]>, |acc, cand| {
+                    Some(match acc {
+                        Some(mut m) => {
+                            for i in 0..4 {
+                                m[i] = m[i].min(cand[i]);
+                            }
+                            m
+                        }
+                        None => cand,
+                    })
+                });
             if let Some(new_freq) = combined
                 && new_freq != last_applied_pll_freq
             {
