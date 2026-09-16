@@ -272,14 +272,31 @@ const POWER_TARGET_MAX_MV: i32 = 3800;
 const POWER_TARGET_AVOID_MV: i32 = 3600;
 /// Hard safety trip, independent of the configured target: step down
 /// immediately, ignoring hysteresis/interval, if power ever reads above
-/// this, short of the device's 133W hard ceiling.
-const POWER_TARGET_SAFETY_W: f64 = 120.0;
+/// this. Raised from the original 120W (itself under a documented 133W
+/// device ceiling) to 137W on 2026-09-16 at explicit user request, after
+/// confirming this device's connected PSU (28V EPR, verified via
+/// pd_ceiling_w_for_voltage -- see that function's doc comment) can
+/// actually supply up to 140W, and after flagging that this overrides
+/// the previously-established 133W limit.
+const POWER_TARGET_SAFETY_W: f64 = 137.0;
 /// How often this loop is allowed to change voltage -- gated past the
 /// SmartSpeed accumulation window (~131.1s, see toast.c's
 /// read_asic_spdlog()) so each step gets a chance to settle before being
 /// judged. The condition is still evaluated on every ~15s STATUS refresh,
 /// just not acted on that often.
 const POWER_TARGET_CHECK_INTERVAL: Duration = Duration::from_secs(150);
+
+/// How often the PSU-ceiling frequency floor-extension is allowed to
+/// step (either direction) -- unlike voltage, frequency changes power
+/// draw near-instantly, so with no gate at all the measurement one tick
+/// later just reflects the step just taken, and the loop chases its own
+/// tail: live-verified 2026-09-16 a full down-to-floor-then-back-up
+/// sawtooth completing in well under 30s with no gate. Shorter than
+/// POWER_TARGET_CHECK_INTERVAL since frequency (unlike voltage's
+/// SmartSpeed accumulation window) has no comparable settling
+/// requirement of its own -- this exists purely to break the
+/// self-referential loop above.
+const PSU_FREQ_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Temperature-target PLL frequency auto-throttle: given a target chip
 /// temperature (`temp_target_c` local var below, unset = feature off),
@@ -880,6 +897,18 @@ fn i2c_read_byte(bus: u32, addr: u32, reg: u32) -> Option<u8> {
     }
 }
 
+/// Margin subtracted from the classified/overridden PD ceiling before
+/// it's allowed to constrain POWER_TARGET_SAFETY_W (see
+/// pd_ceiling_w_for_voltage and read_psu_status). Originally 10W;
+/// narrowed to 3W on 2026-09-16 at explicit user request so a 137W
+/// safety ceiling stays reachable against this device's 140W EPR
+/// contract -- defensible here specifically because the 28V/36V/48V EPR
+/// tiers are a spec-guaranteed exact 5A pairing (not an estimate, see
+/// pd_ceiling_w_for_voltage's doc comment), unlike the SPR tiers below
+/// it in that same function, where the assumed current is a real guess
+/// and this margin is the only thing guarding against it being wrong.
+const PD_CEILING_MARGIN_W: f64 = 3.0;
+
 const PD_I2C_ADDR: u32 = 0x42;
 
 /// HUSB238A `PD_STATUS1` (reg `0x01`) bit 6 = ATTACH -- whether a PD
@@ -961,7 +990,6 @@ fn write_psu_override_w(override_max_w: Option<f64>) {
 /// infrequently by the dashboard and a fresh read costs one `i2cget`
 /// round-trip either way.
 pub(crate) fn read_psu_status() -> (Option<f64>, Option<bool>, Option<f64>, Option<f64>, f64) {
-    const PD_CEILING_MARGIN_W: f64 = 10.0;
     let (bus_v, _current_a, _power_w) = read_power_estimate();
     let bus_v = if bus_v > 0.0 { Some(bus_v) } else { None };
     let attached = read_pd_attached();
@@ -1903,6 +1931,12 @@ fn run_worker(
     // for. Updated only in the `tune:` match arm below, deliberately
     // never by the throttle block itself.
     let mut temp_throttle_base_freq: [u32; 4] = startup_pll_freq;
+    // PSU power-ceiling's own frequency floor -- see its block below for
+    // the full design. Starts unrestricted (equal to the commanded
+    // ceiling) and only ever tightens when voltage-only stepping has
+    // bottomed out and power still exceeds the PD-detected ceiling.
+    let mut psu_ceiling_freq: [u32; 4] = startup_pll_freq;
+    let mut next_psu_freq_check = std::time::Instant::now() + PSU_FREQ_CHECK_INTERVAL;
 
     loop {
         // Poll for an external pause/resume via MUJINA_CONTROL_FILE,
@@ -2179,7 +2213,6 @@ fn run_worker(
             // PSU_CONF_PATH when auto-detection is unavailable/wrong.
             // Only ever tightens the existing POWER_TARGET_SAFETY_W
             // trip, never loosens it.
-            const PD_CEILING_MARGIN_W: f64 = 10.0;
             let pd_ceiling_w = psu_override_max_w
                 .unwrap_or_else(|| pd_ceiling_w_for_voltage(last_bus_v));
             let effective_safety_w = POWER_TARGET_SAFETY_W.min(pd_ceiling_w - PD_CEILING_MARGIN_W);
@@ -2257,15 +2290,14 @@ fn run_worker(
             }
 
             // Temp-target PLL frequency auto-throttle -- see
-            // TEMP_TARGET_DEADBAND_C's doc comment. Calls
-            // nano3s_ipc_set_mode() directly (like the `tune:` arm does)
-            // rather than going through write_tuning_command()'s
-            // control-file round-trip: this runs in the same loop/process
-            // that would read that file back, so the round-trip buys
-            // nothing and would only add a tick of lag. Deliberately does
-            // NOT update temp_throttle_base_freq -- only a
+            // TEMP_TARGET_DEADBAND_C's doc comment. Composes with the PSU
+            // frequency-ceiling trip just below via a single combined
+            // apply (see that block's doc comment for why) instead of
+            // calling nano3s_ipc_set_mode() directly here. Deliberately
+            // does NOT update temp_throttle_base_freq -- only a
             // dashboard/API-commanded frequency (the `tune:` arm above)
             // moves that ceiling.
+            let mut temp_candidate: Option<[u32; 4]> = None;
             if let Some(target_c) = temp_target_c {
                 let temp_max = st.temp_max as f64;
                 if temp_max > 0.0 {
@@ -2285,21 +2317,101 @@ fn run_worker(
                         let mut new_freq = last_applied_pll_freq;
                         for i in 0..4 {
                             let candidate = new_freq[i] as i32 + step_mhz;
-                            let ceiling = temp_throttle_base_freq[i] as i32;
+                            // Respect psu_ceiling_freq too, not just
+                            // temp_throttle_base_freq -- live-verified
+                            // 2026-09-16 that without this, this recovery
+                            // step fights the PSU trip below every tick
+                            // (each one unaware of the other's state),
+                            // thrashing frequency up and down instead of
+                            // settling. Recovering above the PSU ceiling
+                            // is only possible once psu_ceiling_freq
+                            // itself has recovered that far (see that
+                            // block's own stepping).
+                            let ceiling = temp_throttle_base_freq[i].min(psu_ceiling_freq[i]) as i32;
                             new_freq[i] = candidate.clamp(TEMP_TARGET_MIN_MHZ as i32, ceiling) as u32;
                         }
                         if new_freq != last_applied_pll_freq {
                             eprintln!(
                                 "[nano3s] temp-target: temp_max={temp_max:.1}C target={target_c:.1}C freq={last_applied_pll_freq:?} -> {new_freq:?}"
                             );
-                            let rc = unsafe { nano3s_ipc_set_mode(new_freq.as_ptr(), 0) };
-                            if rc != 0 {
-                                eprintln!("[nano3s] temp-target: nano3s_ipc_set_mode failed");
-                            } else {
-                                last_applied_pll_freq = new_freq;
-                            }
+                            temp_candidate = Some(new_freq);
                         }
                     }
+                }
+            }
+
+            // PSU power-ceiling PLL frequency floor-extension -- once the
+            // power-target safety trip's voltage stepping above has
+            // bottomed out at POWER_TARGET_MIN_MV, voltage alone can no
+            // longer bring power under effective_safety_w. Steps
+            // frequency down the same way the temp-target throttle does
+            // above (same step size/floor, for consistency), tracked in
+            // its own psu_ceiling_freq. The temp-target block above
+            // clamps its own recovery to `.min(psu_ceiling_freq)`, so it
+            // can only climb back up as fast as this ceiling itself
+            // recovers -- live-verified 2026-09-16 that without that
+            // cross-reference, the two throttles fight every tick
+            // (temp-throttle recovering toward temp_throttle_base_freq
+            // with no visibility into why PSU just clamped down),
+            // thrashing frequency instead of settling.
+            let voltage_at_floor = (st.voltage_mv as i32) <= POWER_TARGET_MIN_MV;
+            let psu_freq_now = std::time::Instant::now();
+            if psu_freq_now >= next_psu_freq_check {
+                if voltage_at_floor && power_w > effective_safety_w {
+                    for i in 0..4 {
+                        let candidate = psu_ceiling_freq[i] as i32 - TEMP_TARGET_STEP_MHZ;
+                        psu_ceiling_freq[i] =
+                            candidate.clamp(TEMP_TARGET_MIN_MHZ as i32, temp_throttle_base_freq[i] as i32) as u32;
+                    }
+                    next_psu_freq_check = psu_freq_now + PSU_FREQ_CHECK_INTERVAL;
+                } else if power_w < effective_safety_w - POWER_TARGET_DEADBAND_W {
+                    for i in 0..4 {
+                        let candidate = psu_ceiling_freq[i] as i32 + TEMP_TARGET_STEP_MHZ;
+                        psu_ceiling_freq[i] =
+                            candidate.clamp(TEMP_TARGET_MIN_MHZ as i32, temp_throttle_base_freq[i] as i32) as u32;
+                    }
+                    next_psu_freq_check = psu_freq_now + PSU_FREQ_CHECK_INTERVAL;
+                }
+            }
+            let mut psu_candidate: Option<[u32; 4]> = None;
+            {
+                let mut clamped = last_applied_pll_freq;
+                for i in 0..4 {
+                    clamped[i] = clamped[i].min(psu_ceiling_freq[i]);
+                }
+                if clamped != last_applied_pll_freq {
+                    eprintln!(
+                        "[nano3s] PSU freq-ceiling: power={power_w:.1}W ceiling={effective_safety_w:.1}W freq={last_applied_pll_freq:?} -> {clamped:?}"
+                    );
+                    psu_candidate = Some(clamped);
+                }
+            }
+
+            // Combined apply -- elementwise min of whichever candidate(s)
+            // fired this tick (a throttle that didn't fire this tick
+            // contributes no constraint here, since its own state --
+            // temp_throttle_base_freq / psu_ceiling_freq -- already
+            // carries forward independently for next tick).
+            let combined = match (temp_candidate, psu_candidate) {
+                (Some(a), Some(b)) => {
+                    let mut m = a;
+                    for i in 0..4 {
+                        m[i] = m[i].min(b[i]);
+                    }
+                    Some(m)
+                }
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            if let Some(new_freq) = combined
+                && new_freq != last_applied_pll_freq
+            {
+                let rc = unsafe { nano3s_ipc_set_mode(new_freq.as_ptr(), 0) };
+                if rc != 0 {
+                    eprintln!("[nano3s] frequency-throttle: nano3s_ipc_set_mode failed");
+                } else {
+                    last_applied_pll_freq = new_freq;
                 }
             }
 

@@ -230,7 +230,7 @@ async fn patch_board_tuning(
     }
     // Same range check as the dedicated power-target endpoint.
     if let Some(w) = req.power_target_w
-        && !(20.0..=130.0).contains(&w)
+        && !(20.0..=137.0).contains(&w)
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -293,7 +293,7 @@ async fn patch_board_power_target(
     }
     // Range check before the value reaches the power-target loop.
     if let Some(w) = req.target_w
-        && !(20.0..=130.0).contains(&w)
+        && !(20.0..=137.0).contains(&w)
     {
         return Err(StatusCode::BAD_REQUEST);
     }
