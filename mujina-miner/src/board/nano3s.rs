@@ -936,6 +936,117 @@ fn read_outlet_temp_c() -> Option<f64> {
 /// (`PATCH /api/v0/miner {"paused":true}`).
 const MUJINA_CONTROL_FILE: &str = "/tmp/mujina_control";
 
+/// Persisted Live Tuning state, surviving reboots the same way pool
+/// config and the fan curve already do -- unlike those two, tuning
+/// (PLL frequency, voltage, power-target, temp-target) previously lived
+/// only in `run_worker()`'s own local variables, so it silently reset to
+/// hardcoded defaults on every reboot despite the dashboard implying it
+/// was a saved setting (a real reported bug, not a hypothetical).
+const TUNING_CONF_PATH: &str = "/data/userconfig/tuning.conf";
+
+#[derive(Debug, Clone, Default)]
+struct PersistedTuning {
+    pll_freq_mhz: Option<[u32; 4]>,
+    voltage_mv: Option<u32>,
+    power_target_w: Option<f64>,
+    temp_target_c: Option<f64>,
+}
+
+/// Reads [`TUNING_CONF_PATH`], or all-`None` if missing/unparseable --
+/// callers fall back to the existing hardcoded/env-var defaults either
+/// way, same as `pool_config`'s own `load()`.
+fn load_tuning() -> PersistedTuning {
+    let mut cfg = PersistedTuning::default();
+    let Ok(contents) = std::fs::read_to_string(TUNING_CONF_PATH) else {
+        return cfg;
+    };
+    let mut freq = [None; 4];
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim() {
+            "freq0" => freq[0] = value.parse::<u32>().ok(),
+            "freq1" => freq[1] = value.parse::<u32>().ok(),
+            "freq2" => freq[2] = value.parse::<u32>().ok(),
+            "freq3" => freq[3] = value.parse::<u32>().ok(),
+            "voltage_mv" => cfg.voltage_mv = value.parse::<u32>().ok(),
+            "power_target_w" => cfg.power_target_w = value.parse::<f64>().ok(),
+            "temp_target_c" => cfg.temp_target_c = value.parse::<f64>().ok(),
+            _ => {}
+        }
+    }
+    if let [Some(f0), Some(f1), Some(f2), Some(f3)] = freq {
+        cfg.pll_freq_mhz = Some([f0, f1, f2, f3]);
+    }
+    cfg
+}
+
+fn write_tuning_conf(cfg: &PersistedTuning) {
+    let mut out = String::new();
+    if let Some(f) = cfg.pll_freq_mhz {
+        out.push_str(&format!("freq0={}\nfreq1={}\nfreq2={}\nfreq3={}\n", f[0], f[1], f[2], f[3]));
+    }
+    if let Some(v) = cfg.voltage_mv {
+        out.push_str(&format!("voltage_mv={v}\n"));
+    }
+    if let Some(w) = cfg.power_target_w {
+        out.push_str(&format!("power_target_w={w}\n"));
+    }
+    if let Some(t) = cfg.temp_target_c {
+        out.push_str(&format!("temp_target_c={t}\n"));
+    }
+    if let Err(e) = std::fs::write(TUNING_CONF_PATH, out) {
+        eprintln!("[nano3s] failed to write {TUNING_CONF_PATH}: {e}");
+    }
+}
+
+/// Merges the given `Some` fields into the persisted tuning state and
+/// writes it back. Mirrors the live `tune:` directive's own "`None` means
+/// leave this field alone" semantics -- freq/voltage/power-target/
+/// temp-target are only ever *set* here, never cleared (there's no
+/// "unset frequency" concept); explicit disable for power-target/
+/// temp-target goes through [`persist_tuning_clear_power_target`]/
+/// [`persist_tuning_clear_temp_target`] instead, matching those two
+/// fields' own dedicated-endpoint "`None` means explicitly off" meaning.
+fn persist_tuning_set(
+    pll_freq_mhz: Option<[u32; 4]>,
+    voltage_mv: Option<u32>,
+    power_target_w: Option<f64>,
+    temp_target_c: Option<f64>,
+) {
+    let mut cfg = load_tuning();
+    if pll_freq_mhz.is_some() {
+        cfg.pll_freq_mhz = pll_freq_mhz;
+    }
+    if voltage_mv.is_some() {
+        cfg.voltage_mv = voltage_mv;
+    }
+    if power_target_w.is_some() {
+        cfg.power_target_w = power_target_w;
+    }
+    if temp_target_c.is_some() {
+        cfg.temp_target_c = temp_target_c;
+    }
+    write_tuning_conf(&cfg);
+}
+
+fn persist_tuning_clear_power_target() {
+    let mut cfg = load_tuning();
+    cfg.power_target_w = None;
+    write_tuning_conf(&cfg);
+}
+
+fn persist_tuning_clear_temp_target() {
+    let mut cfg = load_tuning();
+    cfg.temp_target_c = None;
+    write_tuning_conf(&cfg);
+}
+
 /// Writes a `tune:` directive to [`MUJINA_CONTROL_FILE`] for the run loop
 /// to pick up on its next poll (~200ms latency). Encodes frequency,
 /// voltage, power-target, and temp-target into one line so a single write
@@ -961,6 +1072,7 @@ pub(crate) fn write_tuning_command(
     {
         return Ok(());
     }
+    persist_tuning_set(pll_freq_mhz, voltage_mv, power_target_w, temp_target_c);
     let f = pll_freq_mhz;
     let fields = [
         f.map(|f| f[0].to_string()).unwrap_or_default(),
@@ -981,8 +1093,14 @@ pub(crate) fn write_tuning_command(
 /// it last was).
 pub(crate) fn write_power_target_command(target_w: Option<f64>) -> std::io::Result<()> {
     let body = match target_w {
-        Some(w) => format!("power_target:{w}"),
-        None => "power_target:off".to_string(),
+        Some(w) => {
+            persist_tuning_set(None, None, Some(w), None);
+            format!("power_target:{w}")
+        }
+        None => {
+            persist_tuning_clear_power_target();
+            "power_target:off".to_string()
+        }
     };
     std::fs::write(MUJINA_CONTROL_FILE, body)
 }
@@ -995,8 +1113,14 @@ pub(crate) fn write_power_target_command(target_w: Option<f64>) -> std::io::Resu
 /// it does not restore the pre-throttle frequency automatically.
 pub(crate) fn write_temp_target_command(target_c: Option<f64>) -> std::io::Result<()> {
     let body = match target_c {
-        Some(c) => format!("temp_target:{c}"),
-        None => "temp_target:off".to_string(),
+        Some(c) => {
+            persist_tuning_set(None, None, None, Some(c));
+            format!("temp_target:{c}")
+        }
+        None => {
+            persist_tuning_clear_temp_target();
+            "temp_target:off".to_string()
+        }
     };
     std::fs::write(MUJINA_CONTROL_FILE, body)
 }
@@ -1565,6 +1689,14 @@ fn run_worker(
     // except Auto/Off/Solid); persists across ticks.
     let mut anim = AnimState::new();
 
+    // Loaded once, up front, so both the startup ramp below and the
+    // loop-local state after it agree on the same values -- see
+    // TUNING_CONF_PATH's doc comment for why this exists at all (this
+    // used to live only in local variables and silently reset to
+    // hardcoded defaults on every reboot, a real reported bug).
+    let persisted_tuning = load_tuning();
+    let startup_pll_freq = persisted_tuning.pll_freq_mhz.unwrap_or(NANO3S_PLL_FREQ_TARGET);
+
     let rc = unsafe { nano3s_ipc_open() };
     let ipc_ok = rc == 0;
     if !ipc_ok {
@@ -1574,11 +1706,18 @@ fn run_worker(
         // hang waiting on responses, but nothing will ever hash.
     } else {
         // Ramp the chain up from its ~100MHz cold bring-up default via
-        // IPC_MSG_SET_MODE. Fire-and-forget -- rtos_core applies the
-        // gradual ramp on its own worker thread.
-        let rc = unsafe { nano3s_ipc_set_mode(NANO3S_PLL_FREQ_TARGET.as_ptr(), 0) };
+        // IPC_MSG_SET_MODE -- to the persisted frequency if one was saved,
+        // otherwise the hardcoded LOW-mode-ish default. Fire-and-forget --
+        // rtos_core applies the gradual ramp on its own worker thread.
+        let rc = unsafe { nano3s_ipc_set_mode(startup_pll_freq.as_ptr(), 0) };
         if rc != 0 {
             eprintln!("[nano3s] nano3s_ipc_set_mode failed -- chain will stay at cold bring-up clock");
+        }
+        if let Some(mv) = persisted_tuning.voltage_mv {
+            let rc = unsafe { nano3s_ipc_set_voltage_raw(mv as i32) };
+            if rc != 0 {
+                eprintln!("[nano3s] startup nano3s_ipc_set_voltage_raw failed");
+            }
         }
 
         // Declare a known-good estimate immediately rather than leaving
@@ -1607,30 +1746,36 @@ fn run_worker(
     let mut shares_found: u32 = 0;
     let mut current_difficulty: f64 = 0.0;
     // Power-target voltage loop -- see POWER_TARGET_STEP_MV's comment
-    // block for the full design. The env var sets the startup value;
-    // live-editable via a `power_target:<W>`/`power_target:off`
-    // control-file command (see the match arm below and
-    // `write_power_target_command()`/`PATCH /api/v0/boards/{name}/power-target`).
-    // `None` means the feature is off.
-    let mut power_target_w: Option<f64> = std::env::var("MUJINA_NANO3S_POWER_TARGET_W")
-        .ok()
-        .and_then(|s| s.trim().parse::<f64>().ok());
+    // block for the full design. Persisted tuning (see TUNING_CONF_PATH)
+    // takes precedence over the env var, which remains the fallback for a
+    // device that's never had this set via the dashboard/API; live-editable
+    // via a `power_target:<W>`/`power_target:off` control-file command
+    // (see the match arm below and `write_power_target_command()`/
+    // `PATCH /api/v0/boards/{name}/power-target`). `None` means the
+    // feature is off.
+    let mut power_target_w: Option<f64> = persisted_tuning.power_target_w.or_else(|| {
+        std::env::var("MUJINA_NANO3S_POWER_TARGET_W")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+    });
     let mut next_power_check = std::time::Instant::now() + POWER_TARGET_CHECK_INTERVAL;
     // `resume_from_idle()` re-powers and re-enumerates the chain, which
     // lands back at rtos_core's ~100MHz cold bring-up default. Track what
     // was actually last applied via a `tune:` command (defaulting to the
-    // startup ramp target) and reapply both after every resume.
-    let mut last_applied_pll_freq: [u32; 4] = NANO3S_PLL_FREQ_TARGET;
-    let mut last_applied_voltage_mv: Option<i32> = None;
+    // startup ramp target, which already accounts for persisted tuning
+    // above) and reapply both after every resume.
+    let mut last_applied_pll_freq: [u32; 4] = startup_pll_freq;
+    let mut last_applied_voltage_mv: Option<i32> = persisted_tuning.voltage_mv.map(|v| v as i32);
     // Temp-target PLL throttle -- see TEMP_TARGET_DEADBAND_C's doc comment.
     // `None` means the feature is off (no automatic frequency changes).
-    let mut temp_target_c: Option<f64> = None;
+    let mut temp_target_c: Option<f64> = persisted_tuning.temp_target_c;
     // The ceiling the throttle recovers back up to -- the last frequency
     // actually *commanded* (dashboard/API `tune:`, not the throttle's own
-    // steps), so throttling down and back up never overshoots what the
-    // user asked for. Updated only in the `tune:` match arm below,
-    // deliberately never by the throttle block itself.
-    let mut temp_throttle_base_freq: [u32; 4] = NANO3S_PLL_FREQ_TARGET;
+    // steps, and now also a persisted value from a previous boot), so
+    // throttling down and back up never overshoots what the user asked
+    // for. Updated only in the `tune:` match arm below, deliberately
+    // never by the throttle block itself.
+    let mut temp_throttle_base_freq: [u32; 4] = startup_pll_freq;
 
     loop {
         // Poll for an external pause/resume via MUJINA_CONTROL_FILE,
