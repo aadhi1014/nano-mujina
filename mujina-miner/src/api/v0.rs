@@ -606,30 +606,41 @@ async fn patch_board_fan(
     if !known {
         return Err(StatusCode::NOT_FOUND);
     }
-    if req.mode.is_none() && req.manual_duty_percent.is_none() {
+    if req.mode.is_none() && req.manual_duty_percent.is_none() && req.chip_temp_target_c.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if let Some(t) = req.chip_temp_target_c
+        && !(40.0..=88.0).contains(&t)
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     #[cfg(feature = "nano3s")]
     {
-        // Always exactly 2 comma-separated fields (mode, duty); empty
-        // means "don't change". Parsed by mujina_test_harness.c's
-        // control_poll_loop().
-        let pct = match req.mode.as_deref() {
-            Some("manual") => Some(req.manual_duty_percent.ok_or(StatusCode::BAD_REQUEST)?),
-            Some("auto") => None,
-            Some(_) => return Err(StatusCode::BAD_REQUEST),
-            None => None,
-        };
-        if req.mode.as_deref() == Some("manual") && pct.is_some_and(|p| p > 100) {
-            return Err(StatusCode::BAD_REQUEST);
+        if req.mode.is_some() || req.manual_duty_percent.is_some() {
+            // Always exactly 2 comma-separated fields (mode, duty);
+            // empty means "don't change". Parsed by
+            // mujina_test_harness.c's control_poll_loop().
+            let pct = match req.mode.as_deref() {
+                Some("manual") => Some(req.manual_duty_percent.ok_or(StatusCode::BAD_REQUEST)?),
+                Some("auto") => None,
+                Some(_) => return Err(StatusCode::BAD_REQUEST),
+                None => None,
+            };
+            if req.mode.as_deref() == Some("manual") && pct.is_some_and(|p| p > 100) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            let fields = [
+                req.mode.clone().unwrap_or_default(),
+                pct.map(|p| p.to_string()).unwrap_or_default(),
+            ];
+            crate::board::nano3s::write_fan_control_command(&format!("fan:{}", fields.join(",")))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
-        let fields = [
-            req.mode.clone().unwrap_or_default(),
-            pct.map(|p| p.to_string()).unwrap_or_default(),
-        ];
-        crate::board::nano3s::write_fan_control_command(&format!("fan:{}", fields.join(",")))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(t) = req.chip_temp_target_c {
+            crate::board::nano3s::write_fan_control_command(&format!("fan_chip_temp_target:{t}"))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
         Ok(StatusCode::OK)
     }
     #[cfg(not(feature = "nano3s"))]

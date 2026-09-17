@@ -112,54 +112,25 @@
         <a href="/info">Info</a>
         <a href="/led">LED</a>
         <a href="/pool">Pool</a>
+        <a href="/tuning">Tuning</a>
         <a href="/firmware" class="active">Firmware</a>
       </nav>
     </div>
   </div>
 
   <div class="warn-banner">
-    <b>One-step, no confirmation.</b> Uploading a file here swaps it in and reboots the device immediately — there's no separate "apply" click. The upload is checked for a valid ELF header (and, for mujina-minerd, the <code>nano3s</code> feature symbols) before anything is written, but a working build that's simply wrong for this hardware can still be uploaded. Mining stops for a couple of minutes while it reboots.
+    <b>One-step, no confirmation.</b> Uploading a bundle here swaps in whatever it contains and reboots the device immediately — there's no separate "apply" click. The upload is checked for a valid ELF header (and, for mujina-minerd, the <code>nano3s</code> feature symbols) before anything is written, but a working build that's simply wrong for this hardware can still be uploaded. Mining stops for a couple of minutes while it reboots.
   </div>
 
-  <div class="sec">Update Everything<span class="sec-sub">one upload, one reboot — pick either or both</span></div>
+  <div class="sec">Update Firmware<span class="sec-sub">one bundle file, one reboot</span></div>
   <div class="card">
-    <p class="hint">Picks both binaries here and applies them together in a single reboot cycle, instead of two separate upload-and-reboot rounds. Bundled into one file entirely in your browser — nothing to pre-package. (Scripting a deploy instead? <code>rtos_core/tools/pack_firmware_bundle.py</code> builds the same format from the command line.)</p>
+    <p class="hint">Build the bundle on the command line with <code>rtos_core/tools/pack_firmware_bundle.py</code> (either or both of <code>--mujina-minerd</code> / <code>--harness</code>), then pick the resulting <code>.bin</code> file here. Only a file starting with the <code>MJBUNDL1</code> bundle header is accepted.</p>
     <div class="filerow">
-      <label style="min-width:110px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)">mujina-minerd</label>
-      <input type="file" id="bundleMinerd">
-    </div>
-    <div class="filerow">
-      <label style="min-width:110px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)">harness</label>
-      <input type="file" id="bundleHarness">
-    </div>
-    <div style="display:flex;justify-content:flex-end">
-      <button class="btn danger" id="uploadBundle">Upload &amp; Apply Both</button>
+      <input type="file" id="bundleFile" accept=".bin">
+      <button class="btn danger" id="uploadBundle">Upload &amp; Apply</button>
     </div>
     <div class="progress-track" id="progressBundle"><div class="progress-fill" id="progressBundleFill"></div></div>
     <div class="msg" id="msgBundle"></div>
-  </div>
-
-  <div class="sec">Update One Component<span class="sec-sub">advanced — each of these reboots on its own</span></div>
-  <div class="sec" style="margin-top:0">mujina-minerd<span class="sec-sub">/data/mujina-minerd — the Rust daemon</span></div>
-  <div class="card">
-    <p class="hint">Cross-compiled with <code>nano3s</code> feature enabled, statically linked (<code>+crt-static</code>). Typically ~19MB.</p>
-    <div class="filerow">
-      <input type="file" id="fileMinerd">
-      <button class="btn danger" id="uploadMinerd">Upload &amp; Apply</button>
-    </div>
-    <div class="progress-track" id="progressMinerd"><div class="progress-fill" id="progressMinerdFill"></div></div>
-    <div class="msg" id="msgMinerd"></div>
-  </div>
-
-  <div class="sec">Harness<span class="sec-sub">/mntapp/release/linux/app/mujina_test_harness — fan/power_en control</span></div>
-  <div class="card">
-    <p class="hint">Statically linked riscv64 glibc binary. Typically under 1MB. <code>/mntapp</code> is only 7.4MB total — leave real headroom.</p>
-    <div class="filerow">
-      <input type="file" id="fileHarness">
-      <button class="btn danger" id="uploadHarness">Upload &amp; Apply</button>
-    </div>
-    <div class="progress-track" id="progressHarness"><div class="progress-fill" id="progressHarnessFill"></div></div>
-    <div class="msg" id="msgHarness"></div>
   </div>
 </div>
 
@@ -178,48 +149,6 @@ async function checkConn() {
 }
 checkConn();
 setInterval(checkConn, 5000);
-
-function uploadFirmware(target, fileInputId, buttonId, progressId, progressFillId, msgId) {
-  const btn = $(buttonId), msg = $(msgId), track = $(progressId), fill = $(progressFillId);
-  const file = $(fileInputId).files[0];
-  if (!file) { msg.textContent = 'pick a file first'; msg.className = 'msg'; return; }
-  if (!confirm(`Upload "${file.name}" (${file.size.toLocaleString()} bytes) as ${target}? The device reboots immediately after a successful upload, no further confirmation.`)) return;
-
-  btn.disabled = true;
-  track.style.display = '';
-  fill.style.width = '0%';
-  msg.textContent = 'uploading…'; msg.className = 'msg pending';
-
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', `/api/v0/firmware/${encodeURIComponent(target)}`);
-  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-  xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) {
-      const pct = Math.round(100 * e.loaded / e.total);
-      fill.style.width = pct + '%';
-      msg.textContent = `uploading… ${pct}% (${e.loaded.toLocaleString()} / ${e.total.toLocaleString()} bytes)`;
-    }
-  };
-  xhr.onload = () => {
-    if (xhr.status >= 200 && xhr.status < 300) {
-      let detail = 'applied';
-      try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
-      msg.textContent = `${detail} ✓ — waiting for device to come back online…`;
-      msg.className = 'msg pending';
-      pollForReboot(msg, btn);
-    } else {
-      msg.textContent = `upload failed (${xhr.status}): ${xhr.responseText || 'rejected'}`;
-      msg.className = 'msg err';
-      btn.disabled = false;
-    }
-  };
-  xhr.onerror = () => {
-    msg.textContent = 'upload failed: network error';
-    msg.className = 'msg err';
-    btn.disabled = false;
-  };
-  xhr.send(file);
-}
 
 async function pollForReboot(msg, btn) {
   // Give the reboot a moment to actually happen before polling, so the
@@ -243,44 +172,30 @@ async function pollForReboot(msg, btn) {
   btn.disabled = false;
 }
 
-$('uploadMinerd').addEventListener('click', () =>
-  uploadFirmware('mujina-minerd', 'fileMinerd', 'uploadMinerd', 'progressMinerd', 'progressMinerdFill', 'msgMinerd'));
-$('uploadHarness').addEventListener('click', () =>
-  uploadFirmware('harness', 'fileHarness', 'uploadHarness', 'progressHarness', 'progressHarnessFill', 'msgHarness'));
+// Bundle files start with the 8-byte MJBUNDL1 magic (see pack_firmware_bundle.py /
+// post_firmware_bundle in v0.rs) -- check it client-side so a wrong file gets a
+// friendly error instead of just a server rejection.
+const BUNDLE_MAGIC = 'MJBUNDL1';
 
-// Bundle: packs whichever file(s) are picked into the MJBUNDL1 format
-// (see pack_firmware_bundle.py / post_firmware_bundle in v0.rs) entirely
-// client-side, then uploads that one blob to /firmware/bundle so both
-// binaries apply in a single reboot instead of two.
-function u32le(n) {
-  const b = new Uint8Array(4);
-  new DataView(b.buffer).setUint32(0, n, true);
-  return b;
-}
-
-async function buildBundle(minerdFile, harnessFile) {
-  const minerdBytes = minerdFile ? new Uint8Array(await minerdFile.arrayBuffer()) : new Uint8Array(0);
-  const harnessBytes = harnessFile ? new Uint8Array(await harnessFile.arrayBuffer()) : new Uint8Array(0);
-  return new Blob([
-    new TextEncoder().encode('MJBUNDL1'),
-    u32le(minerdBytes.length), minerdBytes,
-    u32le(harnessBytes.length), harnessBytes,
-  ], { type: 'application/octet-stream' });
+async function looksLikeBundle(file) {
+  const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  return new TextDecoder().decode(head) === BUNDLE_MAGIC;
 }
 
 async function uploadBundle() {
   const btn = $('uploadBundle'), msg = $('msgBundle'), track = $('progressBundle'), fill = $('progressBundleFill');
-  const minerdFile = $('bundleMinerd').files[0];
-  const harnessFile = $('bundleHarness').files[0];
-  if (!minerdFile && !harnessFile) { msg.textContent = 'pick at least one file'; msg.className = 'msg'; return; }
+  const file = $('bundleFile').files[0];
+  if (!file) { msg.textContent = 'pick a bundle file first'; msg.className = 'msg'; return; }
 
-  const names = [minerdFile ? `mujina-minerd (${minerdFile.name})` : null, harnessFile ? `harness (${harnessFile.name})` : null].filter(Boolean).join(' + ');
-  if (!confirm(`Apply ${names}? The device reboots immediately after a successful upload, no further confirmation.`)) return;
+  if (!(await looksLikeBundle(file))) {
+    msg.textContent = `"${file.name}" doesn't start with the MJBUNDL1 bundle header -- build one with pack_firmware_bundle.py`;
+    msg.className = 'msg err';
+    return;
+  }
+
+  if (!confirm(`Upload "${file.name}" (${file.size.toLocaleString()} bytes)? The device reboots immediately after a successful upload, no further confirmation.`)) return;
 
   btn.disabled = true;
-  msg.textContent = 'packing…'; msg.className = 'msg pending';
-  const blob = await buildBundle(minerdFile, harnessFile);
-
   track.style.display = '';
   fill.style.width = '0%';
   msg.textContent = 'uploading…'; msg.className = 'msg pending';
@@ -316,7 +231,7 @@ async function uploadBundle() {
     msg.className = 'msg err';
     btn.disabled = false;
   };
-  xhr.send(blob);
+  xhr.send(file);
 }
 $('uploadBundle').addEventListener('click', uploadBundle);
 </script>

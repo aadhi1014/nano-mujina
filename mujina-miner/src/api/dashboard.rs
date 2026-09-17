@@ -31,6 +31,7 @@ const LED_HTML: &str = include_str!("../../assets/led.html");
 /// `/dashboard` for the same reason `/led` is -- a standing config surface
 /// rather than a telemetry view.
 const POOL_HTML: &str = include_str!("../../assets/pool.html");
+const TUNING_HTML: &str = include_str!("../../assets/tuning.html");
 /// Network firmware updater (upload mujina-minerd or the harness binary,
 /// applied immediately with a reboot) -- separate from `/dashboard` for
 /// the same reason `/led`/`/pool` are.
@@ -91,6 +92,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/info", routing::get(serve_info_page))
         .route("/led", routing::get(serve_led_page))
         .route("/pool", routing::get(serve_pool_page))
+        .route("/tuning", routing::get(serve_tuning_page))
         .route("/firmware", routing::get(serve_firmware_page))
         .route("/nano3s-detail", routing::get(serve_nano3s_detail))
         .route("/mujina-head-mark.svg", routing::get(serve_logo_svg))
@@ -144,6 +146,10 @@ async fn serve_led_page() -> impl IntoResponse {
 
 async fn serve_pool_page() -> impl IntoResponse {
     Html(POOL_HTML)
+}
+
+async fn serve_tuning_page() -> impl IntoResponse {
+    Html(TUNING_HTML)
 }
 
 async fn serve_firmware_page() -> impl IntoResponse {

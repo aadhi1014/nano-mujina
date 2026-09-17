@@ -351,7 +351,16 @@ const TEMP_TARGET_MIN_MHZ: u32 = 100;
 /// 0.15 and the interval trimmed from 150s to 90s at explicit user
 /// request ("make it climb faster") once the original conservative
 /// values were live-verified to converge safely with no oscillation.
-const AUTOTUNE_LEVEL_STEP: f64 = 0.15;
+/// Lowered from an initial 0.15 at explicit user request ("why is pll
+/// going up too fast") -- live-verified 2026-09-17 that 0.15 could
+/// overshoot the 137W ceiling by a real amount (140W measured briefly)
+/// between a step and the safety check catching it, since power/temp
+/// lag a frequency/voltage change by more than one tick (SmartSpeed
+/// accumulation, thermal mass). A smaller step directly bounds how
+/// large that per-step overshoot can be, independent of the check
+/// interval. Still faster than the original 0.05 this session started
+/// with.
+const AUTOTUNE_LEVEL_STEP: f64 = 0.08;
 /// How far past HIGH (level=1.0) the search is allowed to extrapolate,
 /// at explicit user request ("go above HIGH as long as power stays
 /// under 137W") -- a generous backstop against unbounded growth, not
@@ -361,6 +370,26 @@ const AUTOTUNE_LEVEL_STEP: f64 = 0.15;
 /// hard safety checks apply at every level regardless of range.
 const AUTOTUNE_LEVEL_MAX: f64 = 2.0;
 const AUTOTUNE_CHECK_INTERVAL: Duration = Duration::from_secs(90);
+/// Minimum gap between forced-down safety steps -- live-verified
+/// 2026-09-16 that with no gate at all, a genuine 91.2C reading (a real
+/// trip, correctly overriding the search direction) got judged on every
+/// loop iteration while `nano3s_ipc_get_status()` kept returning that
+/// exact same cached value faster than the sensor itself refreshes,
+/// cascading ~48 consecutive steps straight to the floor instead of the
+/// one or two steps actually needed to clear it. Not a safety problem
+/// (dropping to LOW is always the safe direction), but it threw away
+/// all search progress on a single stale-read burst.
+///
+/// Raised from an initial 5s at explicit user request ("power dropped
+/// too fast to 92W") after a genuine (non-stale) over-limit condition
+/// still produced six back-to-back steps in ~30s -- each individually
+/// justified, but each fired before the previous step's real cooling
+/// effect had time to show up in a fresh reading. Still short enough
+/// to react to a real emergency far faster than the normal
+/// AUTOTUNE_CHECK_INTERVAL search cadence, and less load-bearing now
+/// that AUTOTUNE_TEMP_CEILING_C is a rare last-resort rather than
+/// routine control (see that constant's doc comment).
+const AUTOTUNE_FORCED_STEP_COOLDOWN: Duration = Duration::from_secs(15);
 /// Below-target dead-band -- steps up promptly, since under-target is
 /// the "not doing the job" direction.
 const AUTOTUNE_HASHRATE_DEADBAND_THS: f64 = 0.15;
@@ -374,6 +403,19 @@ const AUTOTUNE_HASHRATE_DEADBAND_ABOVE_THS: f64 = 0.30;
 /// down, on top of the wider dead-band above -- the second half of the
 /// same anti-oscillation guard.
 const AUTOTUNE_HASHRATE_DOWN_CONFIRM_TICKS: u32 = 3;
+/// Autotune's own hard temp ceiling -- deliberately decoupled from
+/// AUTOTUNE_ANCHORS' 90C HIGH-mode limit (used elsewhere for
+/// interpolation) at explicit user request ("use fans to control
+/// temps then voltage for power"). Routine temperature regulation is
+/// now the fan PID's job (mujina_test_harness.c, targeting 90C with
+/// its own 100C emergency) -- live-verified 2026-09-17 that autotune's
+/// level backing off at the same 90C the fan already handles caused a
+/// jarring, fast power/hashrate drop (six consecutive forced-down
+/// steps in ~30s) on top of what the fan was already doing. This stays
+/// as a genuine last-resort backstop for if the fan can't keep pace at
+/// all, not a routine control input -- kept a real margin under the
+/// fan's own 100C emergency so it's never the first thing to trip.
+const AUTOTUNE_TEMP_CEILING_C: f64 = 97.0;
 
 /// `(level, pll_freq_mhz, voltage_mv, temp_limit_c)` calibration anchors
 /// from `/data/factory/hashrate_cali.ini` -- LOW/MED/HIGH, the same
@@ -437,7 +479,7 @@ fn level_to_freq_voltage_limit(level: f64) -> ([u32; 4], u32, f64) {
     }
     volt_mv = volt_mv.clamp(POWER_TARGET_MIN_MV, POWER_TARGET_MAX_MV);
 
-    let limit_c = AUTOTUNE_ANCHORS[2].3;
+    let limit_c = AUTOTUNE_TEMP_CEILING_C;
     (freq, volt_mv as u32, limit_c)
 }
 
@@ -2166,6 +2208,7 @@ fn run_worker(
     let mut autotune_level: f64 = persisted_tuning.autotune_level.unwrap_or(0.5);
     let mut next_autotune_check = std::time::Instant::now() + AUTOTUNE_CHECK_INTERVAL;
     let mut autotune_over_ticks: u32 = 0;
+    let mut next_autotune_forced_check = std::time::Instant::now();
 
     loop {
         // Poll for an external pause/resume via MUJINA_CONTROL_FILE,
@@ -2699,7 +2742,9 @@ fn run_worker(
                 let temp_max = st.temp_max as f64;
                 let now = std::time::Instant::now();
 
-                let forced_down = if power_w > effective_safety_w {
+                let forced_down = if now < next_autotune_forced_check {
+                    false
+                } else if power_w > effective_safety_w {
                     autotune_level = (autotune_level - AUTOTUNE_LEVEL_STEP).max(0.0);
                     eprintln!(
                         "[nano3s] autotune: power={power_w:.1}W exceeds {effective_safety_w:.1}W ceiling -- level -> {autotune_level:.2}"
@@ -2717,6 +2762,7 @@ fn run_worker(
 
                 if forced_down {
                     next_autotune_check = now + AUTOTUNE_CHECK_INTERVAL;
+                    next_autotune_forced_check = now + AUTOTUNE_FORCED_STEP_COOLDOWN;
                     persist_autotune_level(autotune_level);
                 } else if now >= next_autotune_check {
                     let current_ths = st.ghsmm as f64 / 1000.0;

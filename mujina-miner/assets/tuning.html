@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUJINA // TUNING</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cyan: #00f0ff;
+    --mag: #ff2e97;
+    --lime: #c8ff00;
+    --amber: #ffb000;
+    --green: #1bff9c;
+    --red: #ff3860;
+    --purple: #b967ff;
+    --bg: #05060c;
+    --panel: #0a0f1c;
+    --panel2: #0d1424;
+    --line: #14243a;
+    --dim: #4a6a86;
+    --ink: #d6f7ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Share Tech Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 24px 20px 60px; }
+  .top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 20px;
+    flex-wrap: wrap; gap: 10px;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-weight: 900; margin: 0;
+    font-size: 22px; letter-spacing: .16em; text-transform: uppercase;
+  }
+  h1 .chev { color: var(--cyan); text-shadow: 0 0 8px rgba(0,240,255,.5); }
+  .nav a {
+    color: var(--dim); text-decoration: none; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; margin-left: 18px;
+    border-bottom: 1px solid transparent; padding-bottom: 3px;
+  }
+  .nav a:hover, .nav a.active { color: var(--cyan); border-color: var(--cyan); }
+  .status-strip {
+    display: flex; gap: 8px; align-items: center; font-size: 12px;
+    color: var(--dim); letter-spacing: .05em;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+
+  .sec { font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 12px;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--dim);
+    margin: 28px 0 12px; display: flex; align-items: center; gap: 10px; }
+  .sec:first-of-type { margin-top: 0; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+  .sec-sub { font-family: 'Share Tech Mono', monospace; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--dim); flex: none; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); padding: 18px; }
+  .card + .card { margin-top: 12px; }
+  .row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+  .row:last-of-type { margin-bottom: 0; }
+  .row label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  .row label small { text-transform: none; letter-spacing: 0; }
+  .row input[type=text], .row input[type=number] {
+    background: var(--panel2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 4px; padding: 10px 12px; font: inherit; font-size: 13px;
+  }
+  .row input:focus { outline: none; border-color: var(--cyan); }
+
+  .btn {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--ink);
+    padding: 11px 18px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer;
+    border-radius: 4px; transition: all .12s;
+  }
+  .btn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .btn.pri { border-color: var(--cyan); color: var(--cyan); background: rgba(0,240,255,.08); }
+  .btn.pri:hover { background: rgba(0,240,255,.16); box-shadow: 0 0 12px rgba(0,240,255,.25); }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: rgba(255,56,96,.1); box-shadow: 0 0 12px rgba(255,56,96,.25); }
+
+  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+  .msg { margin-top: 12px; font-size: 12px; color: var(--dim); }
+  .msg.ok { color: var(--green); }
+  .msg.err { color: var(--red); }
+  .hint { font-size: 12px; color: var(--dim); margin: 0 0 14px; line-height: 1.5; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; font-size: 12px; margin: 0; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; color: var(--ink); word-break: break-all; }
+
+  .bar-outer { background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; height: 10px; overflow: hidden; margin-top: 6px; }
+  .bar-inner { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--purple)); transition: width .3s; }
+
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .switch { position: relative; width: 42px; height: 24px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 24px; cursor: pointer; transition: all .15s; }
+  .slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 3px; top: 2px; background: var(--dim); border-radius: 50%; transition: all .15s; }
+  .switch input:checked + .slider { border-color: var(--cyan); background: rgba(0,240,255,.1); }
+  .switch input:checked + .slider::before { transform: translateX(18px); background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1><span class="chev">//</span>MUJINA <span style="color:var(--dim);font-weight:400">/ TUNING</span></h1>
+    <div style="display:flex;align-items:center;gap:18px">
+      <div class="status-strip"><span class="dot" id="connDot"></span><span id="connText">connecting…</span></div>
+      <nav class="nav">
+        <a href="/dashboard">Dashboard</a>
+        <a href="/info">Info</a>
+        <a href="/led">LED</a>
+        <a href="/pool">Pool</a>
+        <a href="/tuning" class="active">Tuning</a>
+        <a href="/firmware">Firmware</a>
+      </nav>
+    </div>
+  </div>
+
+  <div class="sec">USB-C PD Input<span class="sec-sub">what the connected PSU is actually delivering</span></div>
+  <div class="card">
+    <dl class="kv">
+      <dt>Bus Voltage</dt><dd id="psuBusV">—</dd>
+      <dt>PD Attached</dt><dd id="psuAttached">—</dd>
+      <dt>Detected Contract</dt><dd id="psuDetected">—</dd>
+      <dt>Effective Ceiling</dt><dd id="psuEffective">—</dd>
+      <dt>Manual Override</dt><dd id="psuOverride">—</dd>
+    </dl>
+    <div class="row" style="margin-top:16px">
+      <label for="psuOverrideInput">Override Max Watts <small>(blank = trust auto-detection)</small></label>
+      <input type="number" id="psuOverrideInput" placeholder="e.g. 100" min="15" max="140" step="1">
+    </div>
+    <div class="actions">
+      <button class="btn pri" id="psuOverrideSave">Set Override</button>
+      <button class="btn" id="psuOverrideClear">Clear Override</button>
+    </div>
+    <div class="msg" id="psuMsg"></div>
+  </div>
+
+  <div class="sec">Hashrate Autotune<span class="sec-sub">searches frequency/voltage for the lowest power that sustains a target TH/s</span></div>
+  <div class="card">
+    <div class="toggle-row" style="margin-bottom:16px">
+      <label for="atEnable" style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)">Enabled</label>
+      <label class="switch"><input type="checkbox" id="atEnable"><span class="slider"></span></label>
+    </div>
+    <div class="row">
+      <label for="atTarget">Target Hashrate (TH/s)</label>
+      <input type="number" id="atTarget" placeholder="e.g. 4.5" min="0.1" max="20" step="0.1">
+    </div>
+    <div class="actions">
+      <button class="btn pri" id="atSave">Apply Target</button>
+    </div>
+    <div class="msg" id="atMsg"></div>
+    <div style="margin-top:16px">
+      <dl class="kv">
+        <dt>Search Level</dt><dd id="atLevel">—</dd>
+        <dt>Current Freq</dt><dd id="atFreq">—</dd>
+        <dt>Current Voltage</dt><dd id="atVolt">—</dd>
+      </dl>
+      <div class="bar-outer"><div class="bar-inner" id="atBar" style="width:0%"></div></div>
+    </div>
+    <p class="hint" style="margin-top:14px">Mutually exclusive with the Live Tuning card's Power Target / Temp Target on the main dashboard — enabling this disables both, and issuing a manual tune command disables this in turn. Levels beyond 1.00 extrapolate past HIGH's own calibration point, hard-clamped to this board's absolute frequency/voltage limits.</p>
+  </div>
+
+  <div class="sec">Fan Chip Thermostat<span class="sec-sub">holds chip temp near a target instead of jumping straight to 100%</span></div>
+  <div class="card">
+    <div class="row">
+      <label for="fanThermTarget">Target Chip Temp (°C)</label>
+      <input type="number" id="fanThermTarget" placeholder="e.g. 85" min="40" max="88" step="1">
+    </div>
+    <div class="actions">
+      <button class="btn pri" id="fanThermSave">Set Target</button>
+    </div>
+    <div class="msg" id="fanThermMsg"></div>
+    <p class="hint" style="margin-top:14px">A true emergency (chip temp still reaching the active mode's real safety limit despite the thermostat) always forces 100% fan, bypassing this target.</p>
+  </div>
+</div>
+
+<script>
+function $(id) { return document.getElementById(id); }
+
+async function loadConn() {
+  try {
+    const r = await fetch('/api/v0/boards');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    await r.json();
+    $('connDot').className = 'dot ok';
+    $('connText').textContent = 'live';
+    return true;
+  } catch (e) {
+    $('connDot').className = 'dot bad';
+    $('connText').textContent = 'fetch failed: ' + e;
+    return false;
+  }
+}
+
+async function loadPsu() {
+  try {
+    const r = await fetch('/api/v0/boards/nano3s-0/psu');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    $('psuBusV').textContent = d.bus_v != null ? d.bus_v.toFixed(2) + ' V' : 'unreadable';
+    $('psuAttached').textContent = d.attached === true ? 'yes' : d.attached === false ? 'no' : '—';
+    $('psuDetected').textContent = d.detected_ceiling_w != null ? d.detected_ceiling_w.toFixed(0) + ' W' : '—';
+    $('psuEffective').textContent = d.effective_ceiling_w.toFixed(0) + ' W';
+    $('psuOverride').textContent = d.override_max_w != null ? d.override_max_w.toFixed(0) + ' W' : 'none (auto)';
+    if (d.override_max_w != null) $('psuOverrideInput').value = d.override_max_w;
+  } catch (e) {
+    $('psuMsg').textContent = 'failed to load PSU status: ' + e;
+    $('psuMsg').className = 'msg err';
+  }
+}
+
+async function savePsuOverride(clear) {
+  const body = {};
+  if (!clear) {
+    const v = parseFloat($('psuOverrideInput').value);
+    if (!isFinite(v)) { $('psuMsg').textContent = 'enter a number first'; $('psuMsg').className = 'msg err'; return; }
+    body.override_max_w = v;
+  }
+  $('psuMsg').textContent = 'saving…'; $('psuMsg').className = 'msg';
+  try {
+    const r = await fetch('/api/v0/boards/nano3s-0/psu', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (await r.text()));
+    $('psuMsg').textContent = clear ? 'override cleared ✓' : 'override set ✓';
+    $('psuMsg').className = 'msg ok';
+    if (clear) $('psuOverrideInput').value = '';
+    loadPsu();
+  } catch (e) { $('psuMsg').textContent = 'failed: ' + e; $('psuMsg').className = 'msg err'; }
+}
+
+async function loadAutotune() {
+  try {
+    const r = await fetch('/api/v0/boards/nano3s-0/autotune-hashrate');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    $('atEnable').checked = d.enabled;
+    if (d.target_ths != null && document.activeElement !== $('atTarget')) $('atTarget').value = d.target_ths;
+    $('atLevel').textContent = d.level.toFixed(2);
+    $('atFreq').textContent = d.level_freq_mhz + ' MHz';
+    $('atVolt').textContent = d.level_voltage_mv + ' mV';
+    const pct = Math.max(0, Math.min(100, d.level * 100));
+    $('atBar').style.width = pct + '%';
+  } catch (e) {
+    $('atMsg').textContent = 'failed to load autotune status: ' + e;
+    $('atMsg').className = 'msg err';
+  }
+}
+
+async function saveAutotune() {
+  const enabled = $('atEnable').checked;
+  const v = parseFloat($('atTarget').value);
+  const body = {};
+  if (enabled) {
+    if (!isFinite(v)) { $('atMsg').textContent = 'enter a target TH/s first'; $('atMsg').className = 'msg err'; return; }
+    body.target_ths = v;
+  } else {
+    body.target_ths = null;
+  }
+  $('atMsg').textContent = 'saving…'; $('atMsg').className = 'msg';
+  try {
+    const r = await fetch('/api/v0/boards/nano3s-0/autotune-hashrate', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (await r.text()));
+    $('atMsg').textContent = enabled ? 'autotune enabled ✓' : 'autotune disabled ✓';
+    $('atMsg').className = 'msg ok';
+    loadAutotune();
+  } catch (e) { $('atMsg').textContent = 'failed: ' + e; $('atMsg').className = 'msg err'; }
+}
+
+async function saveFanThermostat() {
+  const v = parseFloat($('fanThermTarget').value);
+  if (!isFinite(v)) { $('fanThermMsg').textContent = 'enter a temp first'; $('fanThermMsg').className = 'msg err'; return; }
+  $('fanThermMsg').textContent = 'saving…'; $('fanThermMsg').className = 'msg';
+  try {
+    const r = await fetch('/api/v0/boards/nano3s-0/fan', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chip_temp_target_c: v }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (await r.text()));
+    $('fanThermMsg').textContent = 'target set ✓';
+    $('fanThermMsg').className = 'msg ok';
+  } catch (e) { $('fanThermMsg').textContent = 'failed: ' + e; $('fanThermMsg').className = 'msg err'; }
+}
+
+$('psuOverrideSave').addEventListener('click', () => savePsuOverride(false));
+$('psuOverrideClear').addEventListener('click', () => savePsuOverride(true));
+$('atSave').addEventListener('click', saveAutotune);
+$('fanThermSave').addEventListener('click', saveFanThermostat);
+
+loadConn();
+loadPsu();
+loadAutotune();
+setInterval(() => { loadConn(); loadPsu(); loadAutotune(); }, 5000);
+</script>
+</body>
+</html>

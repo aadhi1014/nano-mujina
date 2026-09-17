@@ -166,6 +166,14 @@ pub struct BoardFanRequest {
     pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manual_duty_percent: Option<u8>,
+    /// Live-edits the chip-temp thermostat target (see
+    /// `mujina_test_harness.c`'s `g_fan_chip_thermostat_target_c` doc
+    /// comment) -- the duty the curve+escalation `"auto"` mode
+    /// proportionally holds chip temp near, instead of jumping straight
+    /// to 100% at the mode's real safety limit. Independent of `mode`;
+    /// can be set in the same request or on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chip_temp_target_c: Option<f64>,
 }
 
 /// One point on the fan curve: at `temp_c` outlet temperature, run the
