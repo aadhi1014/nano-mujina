@@ -1,3 +1,5 @@
 Cargo.lock
 /target/
 /.cache/
+/bundle_tmp.bin
+*-bundle.bin
