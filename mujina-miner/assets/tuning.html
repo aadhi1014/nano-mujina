@@ -101,6 +101,19 @@
   .bar-outer { background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; height: 10px; overflow: hidden; margin-top: 6px; }
   .bar-inner { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--purple)); transition: width .3s; }
 
+  .log-panel {
+    margin-top: 14px; background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 10px 12px; max-height: 220px; overflow-y: auto;
+    font-size: 11px; line-height: 1.6;
+  }
+  .log-panel:empty::before { content: 'no autotune activity yet'; color: var(--dim); }
+  .log-line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; }
+  .log-line + .log-line { border-top: 1px solid var(--line); padding-top: 4px; margin-top: 4px; }
+  .log-ts { color: var(--dim); flex: none; }
+  .log-msg { color: var(--ink); }
+  .log-msg.warn { color: var(--amber); }
+  .log-msg.step { color: var(--cyan); }
+
   .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .switch { position: relative; width: 42px; height: 24px; flex: none; }
   .switch input { opacity: 0; width: 0; height: 0; }
@@ -170,6 +183,7 @@
       <div class="bar-outer"><div class="bar-inner" id="atBar" style="width:0%"></div></div>
     </div>
     <p class="hint" style="margin-top:14px">Mutually exclusive with the Live Tuning card's Power Target / Temp Target on the main dashboard — enabling this disables both, and issuing a manual tune command disables this in turn. Levels beyond 1.00 extrapolate past HIGH's own calibration point, hard-clamped to this board's absolute frequency/voltage limits.</p>
+    <div id="atLog" class="log-panel"></div>
   </div>
 
   <div class="sec">Fan Chip Thermostat<span class="sec-sub">holds chip temp near a target instead of jumping straight to 100%</span></div>
@@ -259,6 +273,31 @@ async function loadAutotune() {
   }
 }
 
+function fmtLogTs(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], { hour12: false });
+}
+
+async function loadAutotuneLog() {
+  try {
+    const r = await fetch('/api/v0/boards/nano3s-0/autotune-log');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const panel = $('atLog');
+    const wasAtBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 4;
+    panel.innerHTML = (d.lines || []).map(l => {
+      let cls = '';
+      if (l.line.includes('exceeds') || l.line.includes('failed')) cls = 'warn';
+      else if (l.line.includes(' -> ')) cls = 'step';
+      return `<div class="log-line"><span class="log-ts">${fmtLogTs(l.ts)}</span><span class="log-msg ${cls}">${l.line.replace(/^\[nano3s\] autotune: /, '')}</span></div>`;
+    }).join('');
+    if (wasAtBottom) panel.scrollTop = panel.scrollHeight;
+  } catch (e) {
+    // Non-fatal -- the rest of the Tuning page still works without log
+    // history, so this stays silent rather than fighting atMsg for space.
+  }
+}
+
 async function saveAutotune() {
   const enabled = $('atEnable').checked;
   const v = parseFloat($('atTarget').value);
@@ -302,8 +341,9 @@ $('fanThermSave').addEventListener('click', saveFanThermostat);
 
 loadConn();
 loadPsu();
+loadAutotuneLog();
 loadAutotune();
-setInterval(() => { loadConn(); loadPsu(); loadAutotune(); }, 5000);
+setInterval(() => { loadConn(); loadPsu(); loadAutotune(); loadAutotuneLog(); }, 5000);
 </script>
 </body>
 </html>

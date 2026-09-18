@@ -17,11 +17,12 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::commands::SchedulerCommand;
 use super::server::SharedState;
 use crate::api_client::types::{
-    AutotuneHashrateRequest, AutotuneHashrateResponse, BoardFanRequest, BoardLedRequest,
-    BoardLedState, BoardPauseRequest, BoardPowerTargetRequest, BoardTelemetry,
-    BoardTempTargetRequest, BoardTuningRequest, FanCurvePoint, FanCurveRequest, FanCurveResponse,
-    FirmwareBundleResponse, FirmwareUploadResponse, MinerPatchRequest, MinerTelemetry,
-    PoolConfigRequest, PoolConfigResponse, PsuOverrideRequest, PsuStatusResponse, SourceTelemetry,
+    AutotuneHashrateRequest, AutotuneHashrateResponse, AutotuneLogLine, AutotuneLogResponse,
+    BoardFanRequest, BoardLedRequest, BoardLedState, BoardPauseRequest, BoardPowerTargetRequest,
+    BoardTelemetry, BoardTempTargetRequest, BoardTuningRequest, FanCurvePoint, FanCurveRequest,
+    FanCurveResponse, FirmwareBundleResponse, FirmwareUploadResponse, MinerPatchRequest,
+    MinerTelemetry, PoolConfigRequest, PoolConfigResponse, PsuOverrideRequest, PsuStatusResponse,
+    SourceTelemetry,
 };
 
 /// Upper bound on a firmware upload body -- generous headroom over the
@@ -48,6 +49,7 @@ pub fn routes() -> OpenApiRouter<SharedState> {
         .routes(routes!(patch_board_temp_target))
         .routes(routes!(get_board_psu, patch_board_psu))
         .routes(routes!(get_board_autotune_hashrate, patch_board_autotune_hashrate))
+        .routes(routes!(get_board_autotune_log))
         .routes(routes!(patch_board_fan))
         .routes(routes!(get_board_fan_curve, patch_board_fan_curve))
         .routes(routes!(patch_board_pause))
@@ -511,6 +513,50 @@ async fn get_board_autotune_hashrate(
             level_freq_mhz,
             level_voltage_mv,
         }))
+    }
+    #[cfg(not(feature = "nano3s"))]
+    {
+        Err(StatusCode::NOT_IMPLEMENTED)
+    }
+}
+
+/// Recent hashrate-autotune history -- every level/ceiling transition the
+/// search loop has logged recently, for the dashboard's Tuning page.
+#[utoipa::path(
+    get,
+    path = "/boards/{name}/autotune-log",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    responses(
+        (status = OK, description = "Recent autotune log lines, oldest first", body = AutotuneLogResponse),
+        (status = NOT_FOUND, description = "Board not found"),
+        (status = NOT_IMPLEMENTED, description = "This build's board driver doesn't support autotune"),
+    ),
+)]
+async fn get_board_autotune_log(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<AutotuneLogResponse>, StatusCode> {
+    let known = state
+        .board_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .boards()
+        .into_iter()
+        .any(|b| b.name == name);
+    if !known {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "nano3s")]
+    {
+        let lines = crate::board::nano3s::get_autotune_log()
+            .into_iter()
+            .map(|l| AutotuneLogLine { ts: l.ts, line: l.line })
+            .collect();
+        Ok(Json(AutotuneLogResponse { lines }))
     }
     #[cfg(not(feature = "nano3s"))]
     {

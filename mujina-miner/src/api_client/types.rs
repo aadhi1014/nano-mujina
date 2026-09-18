@@ -274,6 +274,22 @@ pub struct AutotuneHashrateResponse {
     pub level_voltage_mv: u32,
 }
 
+/// One line of recent autotune history.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct AutotuneLogLine {
+    /// Unix seconds -- clients format this in their own local timezone.
+    pub ts: u64,
+    pub line: String,
+}
+
+/// Response body for `GET /api/v0/boards/{name}/autotune-log`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct AutotuneLogResponse {
+    /// Oldest first, capped to the board driver's own in-memory ring
+    /// buffer size -- not a complete history back to process start.
+    pub lines: Vec<AutotuneLogLine>,
+}
+
 /// Request body for `PATCH /api/v0/boards/{name}/pause`.
 ///
 /// Goes through `board::nano3s::write_pause_command()`: pause sends an

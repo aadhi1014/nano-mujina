@@ -32,7 +32,7 @@
 //! - version/ntime/nbits are stored as plain native (little-endian on
 //!   this riscv64 target) `u32` words, no swap.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -182,6 +182,59 @@ static NANO3S_DETAIL: std::sync::Mutex<Option<Nano3sDetail>> = std::sync::Mutex:
 /// can otherwise report a spurious near-infinite difficulty that would
 /// dominate this forever.
 static BEST_SHARE_DIFF: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
+
+/// Ring buffer of recent hashrate-autotune log lines (every `eprintln!`
+/// under the `[nano3s] autotune:` prefix also lands here, via
+/// [`autotune_log`]), so the dashboard's Tuning page can show a live
+/// history without tailing the process's own log file -- there's no
+/// guarantee the caller even has filesystem access to it (a different
+/// container/supervisor setup, no known fixed path in this crate at all).
+static AUTOTUNE_LOG: std::sync::Mutex<VecDeque<AutotuneLogLine>> =
+    std::sync::Mutex::new(VecDeque::new());
+/// Capped generously past what the Tuning page needs to show (a
+/// scrollable handful of recent lines) -- cheap to keep more since each
+/// line is short and this never touches disk.
+const AUTOTUNE_LOG_CAPACITY: usize = 100;
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct AutotuneLogLine {
+    /// Unix seconds -- the dashboard formats this client-side rather than
+    /// this crate pulling in a timezone-aware formatting dependency for
+    /// one field.
+    pub ts: u64,
+    pub line: String,
+}
+
+/// Logs an autotune state-transition message both to stderr (unchanged
+/// behavior, still visible in whatever supervisor/log file captures
+/// stdout/stderr) and into [`AUTOTUNE_LOG`] for the dashboard. All
+/// `[nano3s] autotune: ...` messages in the hashrate-autotune loop and its
+/// enable/disable match arms go through this rather than a bare
+/// `eprintln!`, so the two never drift out of sync.
+fn autotune_log(msg: String) {
+    eprintln!("{msg}");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut log = AUTOTUNE_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    log.push_back(AutotuneLogLine { ts, line: msg });
+    while log.len() > AUTOTUNE_LOG_CAPACITY {
+        log.pop_front();
+    }
+}
+
+/// Snapshot of recent autotune log lines, newest last -- same order the
+/// dashboard wants to render them in. Called from `dashboard.rs`'s
+/// `/api/v0/boards/{name}/autotune-log` route.
+pub(crate) fn get_autotune_log() -> Vec<AutotuneLogLine> {
+    AUTOTUNE_LOG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .cloned()
+        .collect()
+}
 
 /// Latest full detail snapshot, or `None` if no STATUS has arrived yet
 /// (e.g. IPC not connected). Called from `dashboard.rs`'s `/nano3s-detail`
@@ -1373,15 +1426,30 @@ fn persist_tuning_clear_temp_target() {
     write_tuning_conf(&cfg);
 }
 
-/// `Some(target_ths)` enables hashrate-mode autotune and resets its
-/// search state to start from MED (`level=0.5`); `None` disables it,
-/// leaving `autotune_level` (and the freq/voltage it last applied)
-/// untouched, same "leaves things wherever they were" convention as
-/// `persist_tuning_clear_temp_target`.
+/// `Some(target_ths)` enables hashrate-mode autotune, resetting its
+/// search state to start from MED (`level=0.5`) only when actually
+/// turning it on from off; `None` disables it, leaving `autotune_level`
+/// (and the freq/voltage it last applied) untouched, same "leaves things
+/// wherever they were" convention as `persist_tuning_clear_temp_target`.
+///
+/// Previously reset `autotune_level` unconditionally on every call --
+/// this is the API-handler-side persist path (called synchronously from
+/// `write_autotune_hashrate_command`, independent of and earlier than
+/// `run_worker()`'s own in-memory handling of the same command), so it
+/// has its own copy of the same bug fixed in that loop's match arm: a
+/// live target-only tweak (e.g. 6.8 -> 6.5 TH/s) while already running
+/// silently wrote `autotune_level=0.5` to disk even though the in-memory
+/// search correctly kept climbing from its converged level -- invisible
+/// until the next reboot, which resumes from the (wrongly reset)
+/// persisted value instead of where the search actually was,
+/// live-observed 2026-09-18 via `GET .../autotune-hashrate` reporting
+/// level=0.5 (MED) while real hashrate stayed at the converged ~6.7-6.9
+/// TH/s the whole time.
 fn persist_autotune_hashrate_target(target_ths: Option<f64>) {
     let mut cfg = load_tuning();
+    let was_enabled = cfg.autotune_hashrate_target_ths.is_some();
     cfg.autotune_hashrate_target_ths = target_ths;
-    if target_ths.is_some() {
+    if target_ths.is_some() && !was_enabled {
         cfg.autotune_level = Some(0.5);
     }
     write_tuning_conf(&cfg);
@@ -2250,7 +2318,7 @@ fn run_worker(
                 if autotune_hashrate_target_ths.is_some() {
                     autotune_hashrate_target_ths = None;
                     persist_autotune_hashrate_target(None);
-                    eprintln!("[nano3s] autotune: disabled by manual tune command");
+                    autotune_log("[nano3s] autotune: disabled by manual tune command".to_string());
                 }
                 // See write_tuning_command()'s doc comment for the exact
                 // "always 7 fields" wire format this expects.
@@ -2323,7 +2391,7 @@ fn run_worker(
                             if autotune_hashrate_target_ths.is_some() {
                                 autotune_hashrate_target_ths = None;
                                 persist_autotune_hashrate_target(None);
-                                eprintln!("[nano3s] autotune: disabled by manual power-target command");
+                                autotune_log("[nano3s] autotune: disabled by manual power-target command".to_string());
                             }
                             power_target_w = Some(w);
                             // Act on the new target at the next check
@@ -2365,7 +2433,7 @@ fn run_worker(
                             if autotune_hashrate_target_ths.is_some() {
                                 autotune_hashrate_target_ths = None;
                                 persist_autotune_hashrate_target(None);
-                                eprintln!("[nano3s] autotune: disabled by manual temp-target command");
+                                autotune_log("[nano3s] autotune: disabled by manual temp-target command".to_string());
                             }
                             temp_target_c = Some(c);
                             eprintln!("[nano3s] temp-target: live target set to {c:.1}C via dashboard/API");
@@ -2379,7 +2447,7 @@ fn run_worker(
                 if v == "off" {
                     autotune_hashrate_target_ths = None;
                     persist_autotune_hashrate_target(None);
-                    eprintln!("[nano3s] autotune: disabled via dashboard/API");
+                    autotune_log("[nano3s] autotune: disabled via dashboard/API".to_string());
                 } else {
                     match v.parse::<f64>() {
                         Ok(t) => {
@@ -2398,8 +2466,24 @@ fn run_worker(
                             temp_target_c = None;
                             persist_tuning_clear_power_target();
                             persist_tuning_clear_temp_target();
+                            // Only reset the search back to MED when
+                            // actually turning autotune on from off --
+                            // previously reset unconditionally, so even a
+                            // small target tweak (e.g. 7.0 -> 6.9 TH/s)
+                            // while already running threw away a fully
+                            // converged level and cost several minutes of
+                            // reduced hashrate re-climbing from scratch,
+                            // live-observed 2026-09-18. A target change on
+                            // an already-running search should just let
+                            // the next check (forced below) re-evaluate
+                            // the current level against the new target,
+                            // same as a reboot already resumes from the
+                            // persisted level instead of restarting.
+                            let was_enabled = autotune_hashrate_target_ths.is_some();
                             autotune_hashrate_target_ths = Some(t);
-                            autotune_level = 0.5;
+                            if !was_enabled {
+                                autotune_level = 0.5;
+                            }
                             autotune_over_ticks = 0;
                             next_autotune_check = std::time::Instant::now();
                             // psu_ceiling_freq's own recovery is bounded
@@ -2409,10 +2493,32 @@ fn run_worker(
                             // manual-command ceiling (e.g. MED's 338MHz)
                             // can't silently prevent the search from
                             // ever reaching HIGH.
-                            temp_throttle_base_freq = AUTOTUNE_ANCHORS[2].1;
-                            eprintln!(
-                                "[nano3s] autotune: hashrate target set to {t:.2} TH/s via dashboard/API (power-target/temp-target disabled)"
-                            );
+                            //
+                            // Previously hardcoded to AUTOTUNE_ANCHORS[2].1
+                            // (HIGH's exact anchor, 420MHz base) -- a real
+                            // bug found live 2026-09-18: this silently
+                            // capped applied frequency at HIGH regardless
+                            // of how far `level` climbed past 1.0, while
+                            // voltage (applied via a separate uncapped
+                            // path) kept rising with it -- pure wasted
+                            // power/heat for zero hashrate gain once level
+                            // exceeded ~1.0, live-observed oscillating
+                            // 1.06<->1.14 against the 137W ceiling with
+                            // frequency pinned at 420MHz the whole time.
+                            // Now derived from level_to_freq_voltage_limit
+                            // itself at AUTOTUNE_LEVEL_MAX, so this ceiling
+                            // always matches that function's own real
+                            // per-field clamps (440MHz base / 500MHz
+                            // domain3) instead of duplicating a stale
+                            // constant that can silently drift out of sync
+                            // with it.
+                            let (autotune_max_freq, _, _) =
+                                level_to_freq_voltage_limit(AUTOTUNE_LEVEL_MAX);
+                            temp_throttle_base_freq = autotune_max_freq;
+                            autotune_log(format!(
+                                "[nano3s] autotune: hashrate target set to {t:.2} TH/s via dashboard/API (power-target/temp-target disabled){}",
+                                if was_enabled { " -- resuming search from current level, not reset" } else { "" }
+                            ));
                         }
                         Err(_) => eprintln!("[nano3s] malformed autotune_hashrate directive: {s}"),
                     }
@@ -2746,15 +2852,15 @@ fn run_worker(
                     false
                 } else if power_w > effective_safety_w {
                     autotune_level = (autotune_level - AUTOTUNE_LEVEL_STEP).max(0.0);
-                    eprintln!(
+                    autotune_log(format!(
                         "[nano3s] autotune: power={power_w:.1}W exceeds {effective_safety_w:.1}W ceiling -- level -> {autotune_level:.2}"
-                    );
+                    ));
                     true
                 } else if temp_max > 0.0 && temp_max >= limit_c {
                     autotune_level = (autotune_level - AUTOTUNE_LEVEL_STEP).max(0.0);
-                    eprintln!(
+                    autotune_log(format!(
                         "[nano3s] autotune: temp_max={temp_max:.1}C exceeds this level's {limit_c:.1}C limit -- level -> {autotune_level:.2}"
-                    );
+                    ));
                     true
                 } else {
                     false
@@ -2769,18 +2875,18 @@ fn run_worker(
                     if current_ths < target_ths - AUTOTUNE_HASHRATE_DEADBAND_THS {
                         autotune_level = (autotune_level + AUTOTUNE_LEVEL_STEP).min(AUTOTUNE_LEVEL_MAX);
                         autotune_over_ticks = 0;
-                        eprintln!(
+                        autotune_log(format!(
                             "[nano3s] autotune: hashrate={current_ths:.2}TH/s under target={target_ths:.2}TH/s -- level -> {autotune_level:.2}"
-                        );
+                        ));
                         persist_autotune_level(autotune_level);
                     } else if current_ths > target_ths + AUTOTUNE_HASHRATE_DEADBAND_ABOVE_THS {
                         autotune_over_ticks += 1;
                         if autotune_over_ticks >= AUTOTUNE_HASHRATE_DOWN_CONFIRM_TICKS {
                             autotune_level = (autotune_level - AUTOTUNE_LEVEL_STEP).max(0.0);
                             autotune_over_ticks = 0;
-                            eprintln!(
+                            autotune_log(format!(
                                 "[nano3s] autotune: hashrate={current_ths:.2}TH/s comfortably over target={target_ths:.2}TH/s for {AUTOTUNE_HASHRATE_DOWN_CONFIRM_TICKS} ticks -- level -> {autotune_level:.2}"
-                            );
+                            ));
                             persist_autotune_level(autotune_level);
                         }
                     } else {
@@ -2806,7 +2912,7 @@ fn run_worker(
                 if Some(new_volt as i32) != last_applied_voltage_mv {
                     let rc = unsafe { nano3s_ipc_set_voltage_raw(new_volt as i32) };
                     if rc != 0 {
-                        eprintln!("[nano3s] autotune: nano3s_ipc_set_voltage_raw failed");
+                        autotune_log("[nano3s] autotune: nano3s_ipc_set_voltage_raw failed".to_string());
                     } else {
                         last_applied_voltage_mv = Some(new_volt as i32);
                     }
