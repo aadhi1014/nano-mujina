@@ -1264,32 +1264,80 @@ fn read_fan_status() -> Option<Fan> {
 }
 
 /// Board outlet-air NTC thermistor (Shiheng B57891S0103), wired through
-/// the SoC's own ADC and exposed by the kernel's `ntc-thermistor` driver
-/// as a plain Linux hwmon device -- read directly from sysfs here, no
-/// harness/IPC round-trip needed, since this sensor is entirely on the
-/// Linux side (confirmed via a live `i2cdetect` scan of both i2c buses,
-/// 2026-09-14: only the known INA226/HUSB238A/DC-DC/EEPROM chips are
-/// present, nothing else -- this ADC-based thermistor is the only
-/// discrete external temperature sensor on this board). Named by its
-/// driver ("mf52a104f3950") rather than a hardcoded hwmon index, since
-/// hwmon numbering isn't guaranteed stable across kernel/driver-probe
-/// order. There is no inlet-side sensor on this hardware -- Nano3s is a
-/// single-board design; the vendor's inlet-temp code (`get_inlet_temp()`
-/// in the recovered `mm_miner` source) only exists for larger multi-board
-/// Avalon models this codebase doesn't target.
+/// the SoC's own ADC -- entirely on the Linux side, no harness/IPC
+/// round-trip needed (confirmed via a live `i2cdetect` scan of both i2c
+/// buses, 2026-09-14: only the known INA226/HUSB238A/DC-DC/EEPROM chips
+/// are present, nothing else -- this ADC-based thermistor is the only
+/// discrete external temperature sensor on this board). There is no
+/// inlet-side sensor on this hardware -- Nano3s is a single-board design;
+/// the vendor's inlet-temp code (`get_inlet_temp()` in the recovered
+/// `mm_miner` source) only exists for larger multi-board Avalon models
+/// this codebase doesn't target.
+///
+/// Reads the raw ADC register directly and does the NTC resistance/
+/// temperature conversion here, rather than going through the kernel's
+/// `ntc-thermistor` hwmon driver (as this function used to, via
+/// `temp1_input` on the hwmon device named "mf52a104f3950"): that
+/// driver's built-in lookup table for this part is too coarse and rounds
+/// a wide span of real readings to a flat, unmoving 50.0C -- confirmed
+/// live 2026-09-19 against the raw ADC register, which moves smoothly
+/// across the same real thermal swings. See the C-side harness's
+/// identical fix (rtos_core/tools/mujina_test_harness.c,
+/// read_outlet_temp_c()) for the full writeup, including the live
+/// fan-duty-step test that pinned down circuit polarity (not derivable
+/// from the devicetree alone) and the part constants below. Circuit: 10k
+/// pullup to a 1.8V rail, NTC to ground (thermistor0's real devicetree
+/// properties); R25=10k from the part's "103" code, B=3950 from this
+/// project's earlier datasheet lookup.
+const OUTLET_ADC_RAW_PATH: &str =
+    "/sys/devices/platform/soc/9140d000.adc/iio:device0/in_voltage1_raw";
+const OUTLET_ADC_SCALE_PATH: &str =
+    "/sys/devices/platform/soc/9140d000.adc/iio:device0/in_voltage_scale";
+const OUTLET_NTC_PULLUP_OHM: f64 = 10000.0;
+const OUTLET_NTC_PULLUP_MV: f64 = 1800.0;
+const OUTLET_NTC_R25_OHM: f64 = 10000.0;
+const OUTLET_NTC_B: f64 = 3950.0;
+const OUTLET_NTC_T25_K: f64 = 298.15;
+/// Light exponential smoothing, same reasoning as the C-side fix's own
+/// OUTLET_TEMP_EMA_ALPHA: the raw ADC is noisy sample to sample in a way
+/// the old hwmon path's internal driver filtering had been hiding.
+/// Smaller than the C side's 0.2 to match this function's much faster
+/// ~200ms poll cadence (status_poll_loop) rather than the harness's ~1s
+/// -- both land on roughly a 4-5s time constant.
+const OUTLET_TEMP_EMA_ALPHA: f64 = 0.05;
+static OUTLET_TEMP_EMA: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+
 fn read_outlet_temp_c() -> Option<f64> {
-    for entry in std::fs::read_dir("/sys/class/hwmon").ok()?.flatten() {
-        let path = entry.path();
-        let Ok(name) = std::fs::read_to_string(path.join("name")) else {
-            continue;
-        };
-        if name.trim() != "mf52a104f3950" {
-            continue;
-        }
-        let raw = std::fs::read_to_string(path.join("temp1_input")).ok()?;
-        return raw.trim().parse::<f64>().ok().map(|millideg| millideg / 1000.0);
+    let scale_mv: f64 = std::fs::read_to_string(OUTLET_ADC_SCALE_PATH)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if scale_mv <= 0.0 {
+        return None;
     }
-    None
+    let raw: f64 = std::fs::read_to_string(OUTLET_ADC_RAW_PATH)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let vadc_mv = raw * scale_mv;
+    if vadc_mv <= 0.0 || vadc_mv >= OUTLET_NTC_PULLUP_MV {
+        return None;
+    }
+
+    let r_ntc = OUTLET_NTC_PULLUP_OHM * vadc_mv / (OUTLET_NTC_PULLUP_MV - vadc_mv);
+    let inv_t =
+        (1.0 / OUTLET_NTC_T25_K) + (1.0 / OUTLET_NTC_B) * (r_ntc / OUTLET_NTC_R25_OHM).ln();
+    let temp_c = (1.0 / inv_t) - 273.15;
+
+    let mut ema = OUTLET_TEMP_EMA.lock().unwrap_or_else(|e| e.into_inner());
+    let smoothed = match *ema {
+        Some(prev) => prev + OUTLET_TEMP_EMA_ALPHA * (temp_c - prev),
+        None => temp_c,
+    };
+    *ema = Some(smoothed);
+    Some(smoothed)
 }
 
 /// Control file this worker's own loop polls for pause/resume/tune
