@@ -7,6 +7,7 @@
  */
 #include <ctype.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -74,14 +75,65 @@
  * crosses into RT-Smart's separate filesystem namespace. */
 #define FAN_STATUS_FILE "/tmp/fan_status"
 
-/* Board/outlet NTC thermistor sysfs node; temp1_input reads millidegrees C.
- * Drives the fan curve's baseline duty (see fan_reactive_check()) as of
- * 2026-09-14. A 2026-08 soak test found it sat at a flat 50.0C while chip
- * temp_max climbed past 80C with the fan still at its floor -- it tracks
- * board ambient, not chip temp, so it's deliberately NOT the only signal:
- * chip temp still gates a hard escalation to full speed independent of
- * what this reads, which is what makes using it as a baseline safe. */
-#define OUTLET_TEMP_HWMON "/sys/class/hwmon/hwmon1/temp1_input"
+/* Board/outlet NTC thermistor (Shiheng B57891S0103, devicetree node
+ * thermistor0) sysfs node; temp1_input reads millidegrees C. Was the fan
+ * curve's baseline signal (see fan_reactive_check()) through 2026-09-17,
+ * but a live investigation that day found it reads a flat, unmoving
+ * 50000 (50.0C) regardless of real thermal state: the kernel
+ * ntc-thermistor driver's built-in lookup table for this part is too
+ * coarse and rounds a wide span of real readings to one bucket. Confirmed
+ * by comparing against the raw ADC register (OUTLET_ADC_RAW_PATH below)
+ * across a real thermal swing -- that moves smoothly while this sits
+ * dead flat. No longer read; kept only as a comment landmark for anyone
+ * grepping for the old sysfs path. */
+#define OUTLET_TEMP_HWMON_STALE "/sys/class/hwmon/hwmon1/temp1_input"
+
+/* Real outlet reading: raw ADC register + a manual NTC resistance/
+ * temperature conversion done here in userspace, bypassing the kernel
+ * driver's coarse lookup table entirely (see OUTLET_TEMP_HWMON_STALE's
+ * doc comment). Channel 1 of the 6-channel ADC at 9140d000, confirmed
+ * against thermistor0's devicetree properties (io-channels index 1).
+ * in_voltage_scale converts raw counts to millivolts (confirmed live:
+ * 0.44 mV/count, i.e. a 12-bit ADC over the ~1.8V divider supply) --
+ * read once at startup rather than hardcoded, in case it ever differs
+ * from a live unit's calibration. */
+#define OUTLET_ADC_RAW_PATH "/sys/devices/platform/soc/9140d000.adc/iio:device0/in_voltage1_raw"
+#define OUTLET_ADC_SCALE_PATH "/sys/devices/platform/soc/9140d000.adc/iio:device0/in_voltage_scale"
+
+/* Divider circuit, from thermistor0's real devicetree properties
+ * (pullup-ohm=10000, pullup-uv=1800000, pulldown-ohm=0): a fixed 10k
+ * resistor from a 1.8V rail down to the ADC node, with the NTC from the
+ * ADC node to ground (pulldown-ohm=0 means the thermistor itself
+ * occupies that leg, per the ntc-thermistor binding). Polarity was
+ * confirmed live 2026-09-19 with a controlled fan-duty step at constant
+ * heat (autotune's PLL/voltage left untouched): raw ADC rose from ~880
+ * to a ~1660 plateau as 100% duty pulled chip temp_max down from 93C to
+ * 61C, then fell back through ~900 as a follow-up 20% step let temp_max
+ * climb to 98C -- i.e. raw falls as the sensor gets hotter, matching
+ * this ground-side circuit (a competing top-side-NTC reading of the same
+ * raw values gave a physically impossible sub-zero result and was
+ * discarded). R25/B are the part's own values (Shiheng B57891S0103: a
+ * "103" code is 10 * 10^3 ohms = 10k at 25C; B=3950 from this project's
+ * earlier datasheet lookup) -- both give physically sane 34-61C results
+ * across that same calibration run (34C at the 100%-duty/coolest point,
+ * i.e. closest this sensor gets to real room ambient with the case
+ * blowing full airflow). */
+#define OUTLET_NTC_PULLUP_OHM 10000.0
+#define OUTLET_NTC_PULLUP_MV 1800.0
+#define OUTLET_NTC_R25_OHM 10000.0
+#define OUTLET_NTC_B 3950.0
+#define OUTLET_NTC_T25_K 298.15
+
+/* Light exponential smoothing on the converted reading -- the raw ADC
+ * value alone is noisy sample to sample (a real >2x single-sample jump
+ * was observed live during calibration, e.g. 792->475->882 across three
+ * consecutive 5s samples with no real thermal event), noise that the old
+ * hwmon path's own internal driver filtering had been hiding. Feeding
+ * fan_curve_lookup() an unsmoothed reading would translate ADC noise
+ * directly into duty jitter. alpha=0.2 at this function's ~1s call
+ * cadence gives roughly a 5s time constant -- enough to reject a single
+ * glitch sample without meaningfully lagging a real thermal trend. */
+#define OUTLET_TEMP_EMA_ALPHA 0.2
 
 /* Status file mujina-minerd writes every status poll (~200ms) for the LCD
  * renderer, key=value lines including temp_max and the commanded base PLL
@@ -152,23 +204,70 @@ static int read_chip_temp_and_pll0(double *temp_max, double *pll0)
 	return have_temp && have_pll0;
 }
 
-/* Reads OUTLET_TEMP_HWMON, returns degrees C, or -273.0 as an
- * invalid-read sentinel on failure (missing file, unparseable content).
- * Drives the fan curve's baseline (see fan_reactive_check()) -- chip temp
- * separately gates a hard escalation on top of whatever this returns. */
+/* Reads the outlet ADC channel's scale (mV per raw count) once and caches
+ * it -- see OUTLET_ADC_SCALE_PATH's doc comment. Returns 0.0 (an
+ * obviously-invalid scale, caught by the caller) if the file is
+ * unreadable. */
+static double outlet_adc_scale_mv(void)
+{
+	static double cached = -1.0;
+	FILE *f;
+
+	if (cached >= 0.0)
+		return cached;
+
+	f = fopen(OUTLET_ADC_SCALE_PATH, "r");
+	if (!f)
+		return 0.0;
+	if (fscanf(f, "%lf", &cached) != 1)
+		cached = -1.0;
+	fclose(f);
+	return cached < 0.0 ? 0.0 : cached;
+}
+
+/* Real outlet reading: raw ADC -> divider voltage -> NTC resistance ->
+ * B-parameter temperature. See OUTLET_ADC_RAW_PATH/OUTLET_NTC_* doc
+ * comments above for the circuit, polarity, and part constants this is
+ * built from. Returns degrees C, smoothed (OUTLET_TEMP_EMA_ALPHA), or
+ * -273.0 as an invalid-read sentinel (missing/unparseable ADC file, or a
+ * divider voltage at/beyond the rail -- either fails open exactly like a
+ * missing file, since both mean the reading can't be trusted). Drives the
+ * fan curve's baseline (see fan_reactive_check()) -- chip temp separately
+ * gates a hard escalation on top of whatever this returns. */
 static double read_outlet_temp_c(void)
 {
-	FILE *f = fopen(OUTLET_TEMP_HWMON, "r");
-	long millideg;
+	static double ema_c = -1000.0;
+	FILE *f;
+	long raw;
+	double scale_mv, vadc_mv, r_ntc, inv_t, temp_c;
 
+	scale_mv = outlet_adc_scale_mv();
+	if (scale_mv <= 0.0)
+		return -273.0;
+
+	f = fopen(OUTLET_ADC_RAW_PATH, "r");
 	if (!f)
 		return -273.0;
-	if (fscanf(f, "%ld", &millideg) != 1) {
+	if (fscanf(f, "%ld", &raw) != 1) {
 		fclose(f);
 		return -273.0;
 	}
 	fclose(f);
-	return (double)millideg / 1000.0;
+
+	vadc_mv = (double)raw * scale_mv;
+	if (vadc_mv <= 0.0 || vadc_mv >= OUTLET_NTC_PULLUP_MV)
+		return -273.0;
+
+	r_ntc = OUTLET_NTC_PULLUP_OHM * vadc_mv / (OUTLET_NTC_PULLUP_MV - vadc_mv);
+	inv_t = (1.0 / OUTLET_NTC_T25_K) + (1.0 / OUTLET_NTC_B) * log(r_ntc / OUTLET_NTC_R25_OHM);
+	temp_c = (1.0 / inv_t) - 273.15;
+
+	if (ema_c <= -1000.0)
+		ema_c = temp_c;
+	else
+		ema_c += OUTLET_TEMP_EMA_ALPHA * (temp_c - ema_c);
+
+	return ema_c;
 }
 
 static void write_sysfs(const char *path, const char *val)
@@ -320,10 +419,16 @@ static int g_fan_curve_count = 0;
 #define FAN_CURVE_CONF_PATH "/data/userconfig/fan_curve.conf"
 
 /* Built-in default, used until the user saves their own via the
- * dashboard. Outlet sits around 50C under normal load on this unit (see
- * OUTLET_TEMP_HWMON's doc comment) -- ramps through the 20-60C range
- * covers the realistic operating band, reaching full speed by 60C well
- * before the escalation path would ever need to intervene. */
+ * dashboard. Calibrated against the OLD coarse hwmon reading (a flat,
+ * wrong 50C -- see OUTLET_TEMP_HWMON_STALE's doc comment); now that
+ * read_outlet_temp_c() returns the real conversion, normal-load outlet
+ * actually runs closer to 55-60C on this unit, i.e. already into this
+ * curve's steep top segment. Left as-is rather than re-tuned here --
+ * the live device has its own saved curve on disk (FAN_CURVE_CONF_PATH)
+ * that this default never overrides, so this only affects a fresh/reset
+ * install, and re-picking curve points is a policy call for whoever's
+ * actually watching the real numbers on the dashboard, not something to
+ * guess at from one calibration run. */
 static const struct fan_curve_point FAN_CURVE_DEFAULT[] = {
 	{ 20.0, 0.0 },
 	{ 35.0, 15.0 },
@@ -658,10 +763,11 @@ static void fan_thermostat_load(void)
  *    variable's doc comment) that holds temp_max near the target,
  *    taking over from the curve baseline whenever it would call for
  *    more cooling. This is what makes an outlet-only baseline safe:
- *    outlet temp alone can lag chip heat badly (a real soak test saw it
- *    sit flat at 50C while chip temp_max passed 80C -- see
- *    OUTLET_TEMP_HWMON's doc comment), but this reacts to the chips
- *    directly and doesn't depend on outlet tracking them. A true
+ *    outlet temp alone can lag chip heat badly, and briefly reported a
+ *    flat, wrong 50C for a stretch while chip temp_max passed 80C before
+ *    that was root-caused and fixed (see OUTLET_TEMP_HWMON_STALE's doc
+ *    comment) -- this reacts to the chips directly and doesn't depend on
+ *    outlet tracking them. A true
  *    emergency (temp_max reaching FAN_EMERGENCY_TEMP_C, independent of
  *    the active mode's own nominal cali.ini limit -- see that
  *    constant's doc comment) forces real 100%, bypassing the
