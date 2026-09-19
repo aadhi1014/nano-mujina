@@ -16,16 +16,19 @@ CC := riscv64-unknown-linux-musl-gcc
 endif
 OUT ?= build/rtos_core.elf
 
-# -fms-extensions: sha256.h (real vendor header, avalon_mm_src/big/mmu/sha256.h)
-# uses an anonymous member of a named typedef'd struct type
-# ("hash_config_t;" with no member name inside a union) to let sha256.c
-# access ctx->msg directly instead of ctx->config.msg. That's a
-# Microsoft/GNU extension, not standard C11 anonymous-member syntax (which
-# requires the nested type itself to be anonymous, not just the member) --
-# GCC supports it but not by default. Enabling this rather than rewriting
-# the vendor source's access pattern everywhere.
+# -fms-extensions: kept from an earlier dependency (the original sha256.h,
+# since replaced by hash_bridge.c's pure-software implementation) that
+# needed GNU-style anonymous struct/union members. Nothing currently in
+# this tree is confirmed to still require it, but it hasn't been
+# re-tested without it -- leave enabled until that's verified.
 CFLAGS := -mcmodel=medany -march=rv64imafdcv -mabi=lp64d -fms-extensions -Wall -Wextra -O0 -gdwarf-2 -n --static
 CPPFLAGS := -Iinclude -Iinclude/sdk
+# vendor/sdk_libs and vendor/sdk_resource/lib (libipcmsg.a, libipcmsg_slave.a,
+# libdatafifo.a, librtthread.a, libsys.a) are compiled static libraries from
+# Canaan Bright Sight's K230 SDK -- not included in this repo. Get them by
+# building https://github.com/kendryte/k230_sdk (or extracting the
+# equivalent prebuilt libs from a K230 SDK release) and placing them at
+# these paths before building.
 LDFLAGS := -T link.lds -n --static -Lvendor/sdk_libs -Lvendor/sdk_resource/lib
 # --start-group/--end-group: libipcmsg.a (kd_ipcmsg_*) and libpthread have a
 # circular static-link dependency (ipcmsg uses pthread_*, and our own code

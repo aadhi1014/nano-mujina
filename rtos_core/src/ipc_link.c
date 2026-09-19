@@ -1,15 +1,7 @@
 /*
- * IPCM userspace link, built on the K230 SDK's real kd_ipcmsg_* API
- * (vendor/sdk_libs/libipcmsg.a) rather than the raw /dev/ipcm_user ioctls
- * directly. See include/ipc_link.h and docs/BUILD_NOTES.md's Stage 5
- * section for why: the raw-ioctl CONNECT sequence this file used to
- * implement was disassembly-confirmed correct (it matched the vendor
- * library's own IPCMSG_TransConnect instruction-for-instruction: same
- * ioctl numbers, same 44-byte attr struct, same ATTR_INIT-clobbers-fields
- * fix) but a connected channel alone was never enough -- nothing in that
- * layer does the actual message framing/dispatch, which lives in
- * libipcmsg.a's kd_ipcmsg_send_sync/kd_ipcmsg_run instead. This file now
- * calls that real code for both halves.
+ * IPCM userspace link, built on the K230 SDK's kd_ipcmsg_* API
+ * (vendor/sdk_libs/libipcmsg.a): registers a service, connects, and runs
+ * a dispatch thread for sending/receiving messages.
  */
 #include <pthread.h>
 #include <stdint.h>
@@ -28,10 +20,9 @@ void ipc_link_set_recv_handler(ipc_link_recv_fn fn)
 
 static void ipc_link_recv_cb(k_s32 s32Id, k_ipcmsg_message_t *msg)
 {
-	/* Fires for unsolicited messages from the peer -- kd_ipcmsg_send_sync's
-	 * own replies are matched and consumed by the library internally
-	 * before reaching here. This is where mujina's pushed IPC_MSG_JOB/
-	 * IPC_MSG_SET_MODE arrive (Stage 6 onward). */
+	/* Fires for unsolicited messages from the peer; kd_ipcmsg_send_sync's
+	 * own replies are matched and consumed by the library before
+	 * reaching here. */
 	(void)s32Id;
 	if (!msg)
 		return;

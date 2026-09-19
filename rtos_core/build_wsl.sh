@@ -1,22 +1,24 @@
 #!/bin/bash
-# Real musl RT-Smart build, run from WSL. Invoke via:
-#   MSYS_NO_PATHCONV=1 wsl bash /mnt/c/Users/aathe/Desktop/nano3s/rtos_core/build_wsl.sh
-# (not `wsl bash -lc "..."` with an inline command string -- the inherited
-# Windows PATH contains "Program Files (x86)" and other parenthesized
-# entries that break bash's -c argument parsing; a script file sidesteps
-# that entirely. MSYS_NO_PATHCONV=1 stops Git-Bash-for-Windows from
-# mangling the /mnt/c/... path before it reaches WSL.)
+# Real musl RT-Smart build, run from WSL. Invoke as a script file (not
+# `wsl bash -lc "..."` with an inline command string -- the inherited
+# Windows PATH can contain parenthesized entries like "Program Files
+# (x86)" that break bash's -c argument parsing; a script file sidesteps
+# that). If invoking from Git-Bash-for-Windows, set MSYS_NO_PATHCONV=1
+# first so it doesn't mangle /mnt/c/... paths before they reach WSL.
 #
-# Toolchain is a real musl RISC-V64 cross-compiler already extracted here
-# (not on PATH by default -- an earlier session's `find` search for it
-# failed because it only checked WSL/Windows PATH, not this directory).
-# This is the SAME toolchain that produced the currently-deployed, real,
-# musl `rtos_core.elf` that runs on the actual RT-Smart big core (confirmed
-# 2026-07-23 -- see docs/BUILD_NOTES.md's status banner). Do NOT substitute
-# WSL's riscv64-linux-gnu-gcc (glibc) here -- a glibc binary launched via
-# /sharefs/init.sh silently fails to start at all under RT-Smart's msh.
+# Needs a real musl RISC-V64 cross-compiler, not on PATH by default --
+# this project's own copy lives in a sibling `toolchain/` directory next
+# to this repo (not included here; get one, e.g. musl.cc's
+# riscv64-linux-musl cross toolchain, and point TOOLCHAIN_BIN at its
+# bin/ dir, or extract into ../toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/).
+# Do NOT substitute a glibc riscv64-linux-gnu-gcc here -- a glibc binary
+# launched via /sharefs/init.sh silently fails to start at all under
+# RT-Smart's msh.
 set -e
-export PATH=/mnt/c/Users/aathe/Desktop/nano3s/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin:/usr/bin:/bin
-cd /mnt/c/Users/aathe/Desktop/nano3s/rtos_core
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TOOLCHAIN_BIN="${TOOLCHAIN_BIN:-$SCRIPT_DIR/../toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin}"
+export PATH="$TOOLCHAIN_BIN:/usr/bin:/bin"
+cd "$SCRIPT_DIR"
+[ -f vendor/sdk_resource/lib/libipcmsg_slave.a ] || bash tools/install_sdk.sh
 rm -rf build
 make CC=riscv64-unknown-linux-musl-gcc
