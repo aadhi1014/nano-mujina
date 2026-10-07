@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible bug in nano-mujina
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue.
+        Please include enough detail for maintainers to reproduce the behavior.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected to happen.
+      placeholder: A clear and concise description of the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide exact steps, commands, and configuration needed to reproduce.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Paste logs, stack traces, or screenshots that help explain the issue.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Include release version or git commit SHA.
+      placeholder: e.g. commit abc1234
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, hardware, board type, and any relevant setup details.
+      placeholder: Debian 12, Bitaxe Gamma, stock firmware
+    validations:
+      required: false
