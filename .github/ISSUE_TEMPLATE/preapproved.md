@@ -4,18 +4,13 @@ about: |-
   Only for topics already discussed in GitHub Discussions.
 ---
 
-## Please start with a Discussion instead
+## Use the issue templates first
 
-Issues in this project are created by maintainers after a topic has been
-discussed and confirmed. This helps ensure all issues are actionable and
-ready to be worked on.
+Please use the standard issue templates on this repository to report
+bugs or request features.
 
-**To report a bug, suggest a feature, or ask a question:**
-1. Visit our [Discussions page](https://github.com/256foundation/mujina/discussions/new/choose)
-2. Choose the appropriate category
-3. Fill out the template
+- [Open the issue chooser](https://github.com/aadhi1014/nano-mujina/issues/new/choose)
+- [Browse existing issues](https://github.com/aadhi1014/nano-mujina/issues)
 
-Once your discussion reaches a point where there's a clear, actionable item,
-a maintainer will create an issue for it.
-
-Thank you for understanding!
+If your request is not a bug or feature, use
+[Discussions](https://github.com/aadhi1014/nano-mujina/discussions).
